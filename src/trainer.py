@@ -20,7 +20,8 @@ class DeepVQETrainer(L.LightningModule):
         alpha: float = 0.7,
         beta: float = 0.3,
         power: float = 2,
-        lr: float = 1e-3
+        lr: float = 1e-3,
+        compile: bool = True
     ):
         """
         Args:
@@ -36,6 +37,9 @@ class DeepVQETrainer(L.LightningModule):
             self.model = model()  # Instantiate if class is passed
         else:
             self.model = model  # Use instance directly
+        if compile:
+            self.model.compile()
+        
         self.loss_fn = DeepVQELoss(alpha=alpha, beta=beta, power=power)
         self.lr = lr
         self.save_hyperparameters()
@@ -55,21 +59,8 @@ class DeepVQETrainer(L.LightningModule):
                 - clean_target: (B, F, T, 2)
         """
         noisy_mic, system_ref, clean_target = batch['noisy_mic'], batch['farend'], batch['target']
-
-        # Validate inputs for NaN/Inf (helps debug data issues)
-        if torch.isnan(noisy_mic).any() or torch.isinf(noisy_mic).any():
-            raise ValueError(f"NaN/Inf detected in noisy_mic at batch {batch_idx}")
-        if torch.isnan(system_ref).any() or torch.isinf(system_ref).any():
-            raise ValueError(f"NaN/Inf detected in system_ref at batch {batch_idx}")
-        if torch.isnan(clean_target).any() or torch.isinf(clean_target).any():
-            raise ValueError(f"NaN/Inf detected in clean_target at batch {batch_idx}")
-
         # Forward pass
         enhanced = self.model(noisy_mic, system_ref)
-
-        # Check model output
-        if torch.isnan(enhanced).any() or torch.isinf(enhanced).any():
-            raise ValueError(f"NaN/Inf detected in model output at batch {batch_idx}")
 
         # Compute loss
         loss, loss_dict = self.loss_fn(enhanced, clean_target)
