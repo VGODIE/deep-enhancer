@@ -265,21 +265,48 @@ def train_torch(
     else:
         print("Using 32-bit precision")
 
+    # Load checkpoint if exists
+    start_epoch = 0
+    best_val_loss = float('inf')
+    patience_counter = 0
+    global_step = 0
+
+    checkpoint_path = Path(checkpoint_dir)
+    last_ckpt = checkpoint_path / 'last.ckpt'
+
+    if last_ckpt.exists():
+        print(f"\n📂 Loading checkpoint: {last_ckpt}")
+        try:
+            checkpoint = torch.load(last_ckpt, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            global_step = checkpoint.get('global_step', 0)
+            print(f"✓ Resumed from epoch {checkpoint['epoch']}")
+            print(f"  Best val loss: {best_val_loss:.4f}")
+            print(f"  Global step: {global_step}")
+        except Exception as e:
+            print(f"⚠ Warning: Failed to load checkpoint ({e}). Starting from scratch...")
+            start_epoch = 0
+            best_val_loss = float('inf')
+            global_step = 0
+    else:
+        print("\n⚠ No checkpoint found, starting training from scratch")
+
     # Setup TensorBoard logger
     print("\n[4/5] Setting up logging...")
     writer = SummaryWriter(log_dir=os.path.join(log_dir, 'deepvqe'))
 
     # Training state
-    best_val_loss = float('inf')
-    patience_counter = 0
     patience = 10
-    global_step = 0
 
     print("\n[5/5] Starting training...")
     print("=" * 80)
 
     # Epoch progress bar
-    epoch_pbar = tqdm(range(num_epochs), desc="Training", unit="epoch")
+    epoch_pbar = tqdm(range(start_epoch, num_epochs), desc="Training", unit="epoch", initial=start_epoch, total=num_epochs)
 
     for epoch in epoch_pbar:
         # Training phase
@@ -386,15 +413,15 @@ def train_torch(
                     loss, loss_dict = loss_fn(enhanced, clean_target)
 
                 val_loss_sum += loss.item()
-                val_amp_loss_sum += loss_dict['amp_loss'].item()
-                val_phase_loss_sum += loss_dict['phase_loss'].item()
+                val_amp_loss_sum += loss_dict['amp_loss']
+                val_phase_loss_sum += loss_dict['phase_loss']
                 val_batches += 1
 
                 # Update progress bar
                 val_pbar.set_postfix({
                     'loss': f"{loss.item():.4f}",
-                    'amp': f"{loss_dict['amp_loss'].item():.4f}",
-                    'phase': f"{loss_dict['phase_loss'].item():.4f}"
+                    'amp': f"{loss_dict['amp_loss']:.4f}",
+                    'phase': f"{loss_dict['phase_loss']:.4f}"
                 })
 
         val_pbar.close()
@@ -436,6 +463,8 @@ def train_torch(
             'scheduler_state_dict': scheduler.state_dict(),
             'val_loss': val_loss_avg,
             'train_loss': train_loss_avg,
+            'best_val_loss': best_val_loss,
+            'global_step': global_step,
         }
 
         # Save last checkpoint
