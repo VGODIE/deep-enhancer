@@ -8,144 +8,14 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from dataset import create_dataloaders
 from trainer import DeepVQETrainer
 from deepvqe import DeepVQE_S
+from hf_hub_utils import HFCheckpointUploader
 import warnings
+import os
 
 warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
 warnings.filterwarnings("ignore", category=UserWarning, module="torchcodec")
 
-
-def train_lightning(
-    data_dir='./data_stft',
-    batch_size=8,  # Small batch for 10-second clips (memory limited)
-    num_epochs=100,
-    learning_rate=1e-4,  # Reduced from 1e-3 to prevent NaN
-    num_workers=4,  # Reduce to avoid memory issues with large clips
-    alpha=0.7,
-    beta=0.3,
-    checkpoint_dir='./checkpoints',
-    log_dir='./logs',
-    accelerator='auto',  # Auto-detect: cuda on RunPod, mps on Mac
-    devices=1,
-    accumulate_gradients=1
-):
-    """
-    Train DeepVQE model
-
-    Args:
-        data_dir: Path to pre-computed STFT dataset directory (default: './data_stft')
-        batch_size: Training batch size
-        num_epochs: Number of training epochs
-        learning_rate: Learning rate
-        num_workers: Number of data loading workers
-        alpha: Weight for amplitude loss
-        beta: Weight for phase loss
-        checkpoint_dir: Directory to save checkpoints
-        log_dir: Directory for TensorBoard logs
-        accelerator: 'auto', 'gpu', 'cpu', 'mps' (for Mac M1/M2)
-        devices: Number of devices to use
-        accumulate_gradients: Accumulate gradients over N batches (for larger effective batch size)
-    """
-    print("=" * 80)
-    print("DeepVQE Training")
-    print("=" * 80)
-
-    # Create dataloaders
-    print("\n[1/4] Loading dataset...")
-
-    # Enable pin_memory for CUDA (faster GPU transfer)
-    pin_memory = accelerator in ['cuda', 'gpu'] or (accelerator == 'auto' and torch.cuda.is_available())
-    if pin_memory:
-        print("Enabling pin_memory for faster CUDA transfers")
-
-    train_loader, val_loader = create_dataloaders(
-        data_dir=data_dir,
-        batch_size=batch_size,
-        train_split=0.9,
-        num_workers=num_workers,
-        pin_memory=pin_memory  # Enable for CUDA
-    )
-    # Create model
-    print("\n[2/4] Initializing model...")
-    print(f'learning_rate: {learning_rate}')
-    model = DeepVQETrainer(
-        model=DeepVQE_S,
-        alpha=alpha,
-        beta=beta,
-        power=0.3,
-        lr=learning_rate
-    )
-
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-
-    # Setup callbacks
-    print("\n[3/4] Setting up training callbacks...")
-    callbacks = [
-        ModelCheckpoint(
-            dirpath=checkpoint_dir,
-            filename='deepvqe-{epoch:02d}-{val_loss:.4f}',
-            monitor='val_loss',
-            mode='min',
-            save_top_k=3,
-            save_last=True,
-            verbose=True
-        ),
-        EarlyStopping(
-            monitor='val_loss',
-            patience=10,
-            mode='min',
-            verbose=True
-        ),
-        LearningRateMonitor(logging_interval='epoch')
-    ]
-
-    # Setup logger
-    logger = TensorBoardLogger(log_dir, name='deepvqe')
-
-    # Create trainer
-    print("\n[4/4] Starting training...")
-
-    # Auto-detect best precision based on accelerator
-    if accelerator == 'cuda' or (accelerator == 'auto' and torch.cuda.is_available()):
-        precision_setting = 'bf16-mixed'  # BF16 for RTX 5090 (saves ~50% memory)
-        print("Using bf16-mixed precision for CUDA (saves ~50% VRAM)")
-    else:
-        precision_setting = '32'  # Full precision for MPS/CPU
-        print("Using 32-bit precision for MPS/CPU")
-
-    trainer = L.Trainer(
-        max_epochs=num_epochs,
-        callbacks=callbacks,
-        logger=logger,
-        accelerator=accelerator,
-        devices=devices,
-        precision=precision_setting,
-        gradient_clip_val=1.0,  # Clip gradients to prevent exploding gradients
-        log_every_n_steps=10,
-        val_check_interval=0.5,  # Validate twice per epoch
-        enable_progress_bar=True,
-        enable_model_summary=True,
-        detect_anomaly=False,
-        accumulate_grad_batches=accumulate_gradients
-    )
-    print("MPS built:", torch.backends.mps.is_built())
-    print("MPS available:", torch.backends.mps.is_available())
-    # Train (with checkpoint resumption support)
-    # If you stop training, you can resume with the saved checkpoint
-    trainer.fit(model, train_loader, val_loader)
-
-    print("\n" + "=" * 80)
-    print("Training complete!")
-    print(f"Best checkpoint: {trainer.checkpoint_callback.best_model_path}")
-    print(f"Best validation loss: {trainer.checkpoint_callback.best_model_score:.4f}")
-    print("=" * 80)
-
-    return trainer, model
-
-def train_torch(
+def train(
         data_dir='./data_stft',
         batch_size=8,
         num_epochs=100,
@@ -156,8 +26,9 @@ def train_torch(
         checkpoint_dir='./checkpoints',
         log_dir='./logs',
         accelerator='auto',
-        devices=1,
-        accumulate_gradients=1):
+        accumulate_gradients=1,
+        hf_repo_id=None,
+        hf_token=None):
     """
     Pure PyTorch training loop for DeepVQE (without Lightning)
 
@@ -174,8 +45,9 @@ def train_torch(
         accelerator: 'auto', 'gpu', 'cpu', 'mps', 'cuda'
         devices: Number of devices to use (only 1 supported in pure PyTorch version)
         accumulate_gradients: Accumulate gradients over N batches
+        hf_repo_id: Hugging Face repo ID (e.g., 'username/deep-enhancer-checkpoints')
+        hf_token: Hugging Face token (or set HF_TOKEN environment variable)
     """
-    import os
     from pathlib import Path
     from torch.utils.tensorboard import SummaryWriter
     from loss import DeepVQELoss
@@ -184,6 +56,22 @@ def train_torch(
     print("=" * 80)
     print("DeepVQE Training (Pure PyTorch)")
     print("=" * 80)
+
+    # Setup Hugging Face Hub uploader if repo_id provided
+    hf_uploader = None
+    if hf_repo_id:
+        try:
+            print("\n[HF Hub] Setting up checkpoint auto-upload...")
+            hf_uploader = HFCheckpointUploader(
+                repo_id=hf_repo_id,
+                token=hf_token or os.getenv("HF_TOKEN"),
+                private=True
+            )
+            print(f"[HF Hub] ✓ Checkpoints will be uploaded to: https://huggingface.co/{hf_repo_id}")
+        except Exception as e:
+            print(f"[HF Hub] ⚠ Warning: Failed to setup HF Hub uploader ({e})")
+            print("[HF Hub] Continuing without auto-upload...")
+            hf_uploader = None
 
     # Create directories
     Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
@@ -230,9 +118,6 @@ def train_torch(
     print(f'learning_rate: {learning_rate}')
     model = DeepVQE_S().to(device)
 
-    # Compile model for faster training (PyTorch 2.0+)
-    # Note: First few iterations will be slower due to compilation overhead
-    # Speedup typically seen after ~10-20 batches
     try:
         print("Compiling model with torch.compile()...")
         model = torch.compile(model, mode='default')
@@ -477,6 +362,14 @@ def train_torch(
             best_ckpt_path = os.path.join(checkpoint_dir, f'best-epoch{epoch:02d}-val{val_loss_avg:.4f}.ckpt')
             torch.save(checkpoint, best_ckpt_path)
             tqdm.write(f"  *** New best model saved: {best_ckpt_path}")
+
+            # Upload best checkpoint to HF Hub
+            if hf_uploader:
+                hf_uploader.upload_checkpoint(
+                    best_ckpt_path,
+                    commit_message=f"Best model - Epoch {epoch+1}, Val Loss: {val_loss_avg:.4f}"
+                )
+
             patience_counter = 0
         else:
             patience_counter += 1
@@ -504,8 +397,6 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='Train DeepVQE model')
-    parser.add_argument('--mode', type=str, default='torch', choices=['lightning', 'torch'],
-                        help='Training mode: "lightning" for PyTorch Lightning, "torch" for pure PyTorch')
     parser.add_argument('--data_dir', type=str, default='./data_stft',
                         help='Path to pre-computed STFT dataset directory')
     parser.add_argument('--batch_size', type=int, default=4,
@@ -527,18 +418,17 @@ if __name__ == "__main__":
     parser.add_argument('--accelerator', type=str, default='auto',
                         choices=['auto', 'gpu', 'cpu', 'mps', 'cuda'],
                         help='Accelerator type (auto detects cuda/mps/cpu)')
-    parser.add_argument('--devices', type=int, default=1,
-                        help='Number of devices')
     parser.add_argument('--accumulate_gradients', type=int, default=1,
                         help='Accumulate gradients over N batches for larger effective batch size')
+    parser.add_argument('--hf_repo_id', type=str, default=None,
+                        help='Hugging Face repo ID for auto-uploading checkpoints (e.g., "username/deep-enhancer-ckpts"). Token from HF_TOKEN env var.')
 
     args = parser.parse_args()
 
     print('Train args: ', args)
 
-    # Choose training function based on mode
-    if args.mode == 'lightning':
-        train_lightning(
+
+    train(
             data_dir=args.data_dir,
             batch_size=args.batch_size,
             num_epochs=args.epochs,
@@ -550,20 +440,7 @@ if __name__ == "__main__":
             log_dir=args.log_dir,
             accelerator=args.accelerator,
             devices=args.devices,
-            accumulate_gradients=args.accumulate_gradients
-        )
-    else:  # torch mode
-        train_torch(
-            data_dir=args.data_dir,
-            batch_size=args.batch_size,
-            num_epochs=args.epochs,
-            learning_rate=args.lr,
-            num_workers=args.num_workers,
-            alpha=args.alpha,
-            beta=args.beta,
-            checkpoint_dir=args.checkpoint_dir,
-            log_dir=args.log_dir,
-            accelerator=args.accelerator,
-            devices=args.devices,
-            accumulate_gradients=args.accumulate_gradients
+            accumulate_gradients=args.accumulate_gradients,
+            hf_repo_id=args.hf_repo_id,
+            hf_token=None
         )
