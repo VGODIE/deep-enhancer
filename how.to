@@ -3,5 +3,6 @@ git clone https://github.com/VGODIE/deep-enhancer.git
 cd deep-enhancer
 pip install -U pip
 pip install -r requirements.txt
-python src/upload_to_hf --action download-file --repo-id vgodie/data_stft --repo-type dataset --local-path . --filename dataset.tar.gz
+python src/upload_to_hf.py --action download-file --repo-id vgodie/data_stft --repo-type dataset --local-path . --filename dataset.tar.gz
 pv dataset.tar.gz | tar -I pigz -x && rm dataset.tar.gz
+python src/train.py --batch_size 42 --hf_repo_id vgodie/deep-vqe-s

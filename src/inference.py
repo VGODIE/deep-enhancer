@@ -67,6 +67,11 @@ def load_checkpoint(checkpoint_path, model_class=DeepVQE_S, device='auto'):
         # Assume direct state dict
         state_dict = checkpoint
 
+    # Handle torch.compile() wrapper - remove "_orig_mod." prefix
+    if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
+        print("  Detected torch.compile() checkpoint, removing '_orig_mod.' prefix...")
+        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+
     # Create model and load weights
     model = model_class().to(device)
     model.load_state_dict(state_dict)
@@ -109,9 +114,11 @@ def audio_to_stft(
     Returns:
         stft_complex: STFT tensor of shape (F, T, 2) [real, imag]
         original_length: Original audio length in samples (for iSTFT)
+        original_sr: Original sample rate of the input audio
     """
     # Load audio
     waveform, sr = torchaudio.load(audio_path)
+    original_sr = sr  # Store original sample rate
 
     # Mono conversion
     if waveform.shape[0] > 1:
@@ -140,7 +147,7 @@ def audio_to_stft(
     # Convert to (F, T, 2) format [real, imag]
     stft_complex = torch.stack([stft.real, stft.imag], dim=-1)
 
-    return stft_complex.to(device), original_length
+    return stft_complex.to(device), original_length, original_sr
 
 
 def stft_to_audio(
@@ -150,7 +157,8 @@ def stft_to_audio(
     n_fft=512,
     hop_length=128,
     win_length=512,
-    original_length=None
+    original_length=None,
+    original_sr=None
 ):
     """
     Convert STFT back to audio and save
@@ -158,11 +166,12 @@ def stft_to_audio(
     Args:
         stft_complex: STFT tensor of shape (F, T, 2) [real, imag]
         output_path: Path to save audio file
-        sample_rate: Sample rate
+        sample_rate: Sample rate (processing rate, typically 24kHz)
         n_fft: FFT size
         hop_length: Hop length
         win_length: Window length
         original_length: Original audio length (for trimming)
+        original_sr: Original sample rate to resample back to (if different from sample_rate)
     """
     # Convert (F, T, 2) back to complex tensor
     stft = torch.complex(stft_complex[..., 0], stft_complex[..., 1])
@@ -180,9 +189,15 @@ def stft_to_audio(
     if original_length is not None:
         waveform = waveform[:original_length]
 
+    # Resample back to original sample rate if different
+    if original_sr is not None and original_sr != sample_rate:
+        resampler = torchaudio.transforms.Resample(sample_rate, original_sr)
+        waveform = resampler(waveform)
+
     # Save audio
     waveform = waveform.unsqueeze(0).cpu()  # Add channel dimension
-    torchaudio.save(output_path, waveform, sample_rate)
+    save_sr = original_sr if original_sr is not None else sample_rate
+    torchaudio.save(output_path, waveform, save_sr)
 
 
 @torch.no_grad()
@@ -212,12 +227,25 @@ def inference_single(
         win_length: Window length
     """
     # Load and convert to STFT
-    mic_stft, original_length = audio_to_stft(
+    mic_stft, original_length, original_sr = audio_to_stft(
         mic_path, sample_rate, n_fft, hop_length, win_length, device
     )
-    farend_stft, _ = audio_to_stft(
+    farend_stft, _, _ = audio_to_stft(
         farend_path, sample_rate, n_fft, hop_length, win_length, device
     )
+
+    # Align time dimensions by padding to match the longer one
+    # This handles cases where mic and farend have slightly different lengths
+    max_time = max(mic_stft.shape[1], farend_stft.shape[1])
+
+    if mic_stft.shape[1] != farend_stft.shape[1]:
+        # Pad the shorter one with zeros
+        if mic_stft.shape[1] < max_time:
+            pad_size = max_time - mic_stft.shape[1]
+            mic_stft = torch.nn.functional.pad(mic_stft, (0, 0, 0, pad_size))
+        if farend_stft.shape[1] < max_time:
+            pad_size = max_time - farend_stft.shape[1]
+            farend_stft = torch.nn.functional.pad(farend_stft, (0, 0, 0, pad_size))
 
     # Add batch dimension: (F, T, 2) -> (1, F, T, 2)
     mic_stft = mic_stft.unsqueeze(0)
@@ -229,7 +257,7 @@ def inference_single(
     # Remove batch dimension: (1, F, T, 2) -> (F, T, 2)
     enhanced_stft = enhanced_stft.squeeze(0)
 
-    # Convert back to audio and save
+    # Convert back to audio and save (resample back to original sample rate)
     stft_to_audio(
         enhanced_stft.cpu(),
         output_path,
@@ -237,7 +265,8 @@ def inference_single(
         n_fft,
         hop_length,
         win_length,
-        original_length
+        original_length,
+        original_sr
     )
 
 
@@ -408,19 +437,17 @@ def main():
                         help='HF repo ID (e.g., username/deep-enhancer-checkpoints)')
     parser.add_argument('--checkpoint_name', type=str, default=None,
                         help='Checkpoint filename in HF repo (requires --hf_repo_id)')
-    parser.add_argument('--hf_token', type=str, default=None,
-                        help='HF token (optional, can use HF_TOKEN env var)')
 
     # Input/Output arguments
-    parser.add_argument('--test_dir', type=str, default=None,
+    parser.add_argument('--test-dir', type=str, default=None,
                         help='Directory with test audio files (batch mode)')
-    parser.add_argument('--output_dir', type=str, default='./enhanced_audio',
+    parser.add_argument('--output-dir', type=str, default='./enhanced_audio',
                         help='Output directory for enhanced audio')
-    parser.add_argument('--mic_file', type=str, default=None,
+    parser.add_argument('--mic-file', type=str, default=None,
                         help='Single mic audio file (single mode)')
-    parser.add_argument('--farend_file', type=str, default=None,
+    parser.add_argument('--farend-file', type=str, default=None,
                         help='Single farend audio file (single mode)')
-    parser.add_argument('--output_file', type=str, default='enhanced.wav',
+    parser.add_argument('--output-file', type=str, default='enhanced.wav',
                         help='Output file for single mode')
 
     # STFT parameters (must match training)
