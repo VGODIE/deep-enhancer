@@ -19,10 +19,10 @@ Usage:
 
 Dataset structure expected:
     aec_challenge_2023/
-        012WdMimp0qNGJt1UBI02g_farend_singletalk_lpb.wav
-        012WdMimp0qNGJt1UBI02g_farend_singletalk_mic.wav
-        012WdMimp0qNGJt1UBI02g_farend_singletalk_with_movement_lpb.wav
-        012WdMimp0qNGJt1UBI02g_farend_singletalk_with_movement_mic.wav
+        0a0aTELYCki1fyo5VvfMyQ_farend-singletalk_lpb.wav
+        0a0aTELYCki1fyo5VvfMyQ_farend-singletalk_mic.wav
+        zYAIKwD4BEysnGrzZuRXKQ_farend-singletalk-with-movement_lpb.wav
+        zYAIKwD4BEysnGrzZuRXKQ_farend-singletalk-with-movement_mic.wav
         ...
 """
 import torch
@@ -50,12 +50,12 @@ def group_aec_files(aec_data_dir):
     for wav_file in wav_files:
         filename = wav_file.stem
 
-        # Only process farend singletalk files
-        if 'farend_singletalk' not in filename:
+        # Only process farend singletalk files (with hyphen)
+        if 'farend-singletalk' not in filename:
             continue
 
         # Parse filename: {sample_id}_{scenario}_{channel}.wav
-        # Example: 012WdMimp0qNGJt1UBI02g_farend_singletalk_lpb.wav
+        # Example: 0a0aTELYCki1fyo5VvfMyQ_farend-singletalk_lpb.wav
         parts = filename.split('_')
 
         if len(parts) < 3:
@@ -64,11 +64,11 @@ def group_aec_files(aec_data_dir):
         sample_id = parts[0]
         channel = parts[-1]  # lpb or mic
 
-        # Determine scenario type
-        if 'farend_singletalk_with_movement' in filename:
-            scenario = 'farend_singletalk_with_movement'
-        elif 'farend_singletalk' in filename:
-            scenario = 'farend_singletalk'
+        # Determine scenario type (with hyphen)
+        if 'farend-singletalk-with-movement' in filename:
+            scenario = 'farend-singletalk-with-movement'
+        elif 'farend-singletalk' in filename:
+            scenario = 'farend-singletalk'
         else:
             continue
 
@@ -172,10 +172,10 @@ def process_farend_singletalk(
     output_dir = Path(output_dir)
     created_samples = []
 
-    # Scenarios to process
-    scenarios = ['farend_singletalk']
+    # Scenarios to process (with hyphens)
+    scenarios = ['farend-singletalk']
     if include_movement:
-        scenarios.append('farend_singletalk_with_movement')
+        scenarios.append('farend-singletalk-with-movement')
 
     for scenario in scenarios:
         if scenario in files:
@@ -189,7 +189,7 @@ def process_farend_singletalk(
             mic_path = scenario_files['mic']
 
             # Create output filename
-            scenario_suffix = scenario.replace('farend_singletalk', 'farend')
+            scenario_suffix = scenario.replace('farend-singletalk', 'farend')
             output_id = f"{sample_id}_{scenario_suffix}"
 
             # Convert to STFT
