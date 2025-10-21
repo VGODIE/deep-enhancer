@@ -165,7 +165,7 @@ def is_clipped(audio, threshold=0.99):
         return (np.abs(audio) > threshold).any()
 
 
-def load_audio_file(file_path, sample_rate=24000, device='cpu'):
+def load_audio_file(file_path, sample_rate=24000, device='cpu', debug=False):
     """
     Load audio file and resample if needed
 
@@ -173,6 +173,7 @@ def load_audio_file(file_path, sample_rate=24000, device='cpu'):
         file_path: Path to audio file
         sample_rate: Target sample rate
         device: Device to use
+        debug: Enable debug output
 
     Returns:
         waveform (torch tensor), or None if failed
@@ -196,11 +197,15 @@ def load_audio_file(file_path, sample_rate=24000, device='cpu'):
 
         # Check for clipping
         if is_clipped(waveform):
+            if debug:
+                tqdm.write(f"    Audio clipped: {file_path}")
             return None
 
         return waveform
 
-    except Exception:
+    except Exception as e:
+        if debug:
+            tqdm.write(f"    Failed to load: {file_path} - {e}")
         return None
 
 
@@ -209,7 +214,8 @@ def build_audio_from_sources(
     target_length,
     sample_rate=24000,
     device='cpu',
-    activity_threshold=0.0
+    activity_threshold=0.0,
+    debug=False
 ):
     """
     Build audio by concatenating multiple source files until target length is reached
@@ -221,6 +227,7 @@ def build_audio_from_sources(
         sample_rate: Sample rate
         device: Device to use
         activity_threshold: Minimum activity threshold
+        debug: Enable debug output
 
     Returns:
         concatenated audio, list of files used, or (None, []) if failed
@@ -238,7 +245,7 @@ def build_audio_from_sources(
         idx = (idx + 1) % len(source_files)
 
         # Load audio
-        audio = load_audio_file(source_files[idx], sample_rate, device)
+        audio = load_audio_file(source_files[idx], sample_rate, device, debug)
 
         if audio is None:
             tries += 1
@@ -262,12 +269,16 @@ def build_audio_from_sources(
 
     if remaining_length > 0:
         # Failed to build complete audio
+        if debug:
+            tqdm.write(f"    Failed to build complete audio: remaining={remaining_length}/{target_length}")
         return None, []
 
     # Check activity
     if activity_threshold > 0.0:
         activity = activitydetector(output_audio, sample_rate)
         if activity < activity_threshold:
+            if debug:
+                tqdm.write(f"    Activity too low: {activity:.3f} < {activity_threshold}")
             return None, []
 
     return output_audio, files_used
@@ -304,7 +315,8 @@ def process_dns_sample(
     snr_upper=20,
     target_level=-25,
     clean_activity_threshold=0.5,
-    noise_activity_threshold=0.0
+    noise_activity_threshold=0.0,
+    debug=False
 ):
     """
     Process a single DNS sample:
@@ -326,6 +338,7 @@ def process_dns_sample(
         target_level: Target level (dB)
         clean_activity_threshold: Activity threshold for clean
         noise_activity_threshold: Activity threshold for noise
+        debug: Enable debug output
 
     Returns:
         True if successful, False otherwise
@@ -341,10 +354,13 @@ def process_dns_sample(
             chunk_samples,
             sample_rate,
             device,
-            clean_activity_threshold
+            clean_activity_threshold,
+            debug
         )
 
         if clean is None:
+            if debug:
+                tqdm.write(f"  Attempt {attempt+1}: Failed to build clean audio")
             continue
 
         # Build noise (same length as clean)
@@ -353,10 +369,13 @@ def process_dns_sample(
             len(clean),
             sample_rate,
             device,
-            noise_activity_threshold
+            noise_activity_threshold,
+            debug
         )
 
         if noise is None:
+            if debug:
+                tqdm.write(f"  Attempt {attempt+1}: Failed to build noise audio")
             continue
 
         # Random SNR
@@ -369,6 +388,8 @@ def process_dns_sample(
 
         # Check for clipping
         if is_clipped(clean_scaled) or is_clipped(noise_scaled) or is_clipped(noisy):
+            if debug:
+                tqdm.write(f"  Attempt {attempt+1}: Clipping detected after mixing")
             continue
 
         # Step 2: Create triplet in memory
@@ -384,7 +405,9 @@ def process_dns_sample(
             noisy_mic_stft = convert_to_stft(noisy_mic, stft_transform)
             farend_stft = convert_to_stft(farend, stft_transform)
             target_stft = convert_to_stft(target, stft_transform)
-        except Exception:
+        except Exception as e:
+            if debug:
+                tqdm.write(f"  Attempt {attempt+1}: STFT transform failed: {e}")
             continue
 
         source_string = '|'.join(sorted(clean_files_used)) + '|' + \
@@ -407,12 +430,16 @@ def process_dns_sample(
 
             return True
 
-        except Exception:
+        except Exception as e:
+            if debug:
+                tqdm.write(f"  Attempt {attempt+1}: Failed to save file: {e}")
             if output_file.exists():
                 output_file.unlink()
             continue
 
     # Failed after max tries
+    if debug:
+        tqdm.write(f"  Failed after {max_tries} attempts")
     return False
 
 
@@ -546,6 +573,9 @@ def preprocess_dns_nearend_singletalk(
     failed = 0
 
     for i in tqdm(range(num_samples), desc="Generating DNS samples"):
+        # Enable debug for first 3 failed samples
+        debug = (failed < 3)
+
         success = process_dns_sample(
             clean_files=clean_files,
             noise_files=noise_files,
@@ -558,7 +588,8 @@ def preprocess_dns_nearend_singletalk(
             snr_upper=snr_upper,
             target_level=target_level,
             clean_activity_threshold=clean_activity_threshold,
-            noise_activity_threshold=noise_activity_threshold
+            noise_activity_threshold=noise_activity_threshold,
+            debug=debug
         )
 
         if success:
