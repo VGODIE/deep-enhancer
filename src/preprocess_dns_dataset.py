@@ -48,7 +48,6 @@ from tqdm import tqdm
 import argparse
 import numpy as np
 import random
-import hashlib
 
 
 def set_seed(seed=42):
@@ -157,26 +156,18 @@ def segmental_snr_mixer(clean, noise, snr, target_level=-25, eps=1e-10):
     return clean_scaled, noise_scaled, noisy, target_level
 
 
-def is_clipped(audio, threshold=0.99):
-    """Check if audio has clipping"""
-    if isinstance(audio, torch.Tensor):
-        return (torch.abs(audio) > threshold).any().item()
-    else:
-        return (np.abs(audio) > threshold).any()
-
-
-def load_audio_file(file_path, sample_rate=24000, device='cpu', debug=False):
+def load_and_clip_audio(file_path, sample_rate=24000, target_length_sec=10.0, device='cpu'):
     """
-    Load audio file and resample if needed
+    Load audio file, clip to target length (exactly 10 seconds)
 
     Args:
         file_path: Path to audio file
         sample_rate: Target sample rate
+        target_length_sec: Target length in seconds (default 10)
         device: Device to use
-        debug: Enable debug output
 
     Returns:
-        waveform (torch tensor), or None if failed
+        waveform (torch tensor) of exactly target_length_sec, or None if failed
     """
     try:
         waveform, sr = torchaudio.load(file_path)
@@ -195,93 +186,57 @@ def load_audio_file(file_path, sample_rate=24000, device='cpu', debug=False):
 
         waveform = waveform.squeeze(0)
 
-        # Check for clipping
-        if is_clipped(waveform):
-            if debug:
-                tqdm.write(f"    Audio clipped: {file_path}")
-            return None
+        target_length = int(target_length_sec * sample_rate)
+
+        # Check if file is long enough
+        if len(waveform) < target_length:
+            return None  # Skip files shorter than target
+
+        # Clip to exactly target length (take first 10 seconds)
+        waveform = waveform[:target_length]
 
         return waveform
 
-    except Exception as e:
-        if debug:
-            tqdm.write(f"    Failed to load: {file_path} - {e}")
+    except Exception:
         return None
 
 
-def build_audio_from_sources(
-    source_files,
-    target_length,
-    sample_rate=24000,
-    device='cpu',
-    activity_threshold=0.0,
-    debug=False
-):
+def get_random_audio_clip(source_files, sample_rate=24000, target_length_sec=10.0, device='cpu',
+                          activity_threshold=0.0, max_tries=100):
     """
-    Build audio by concatenating multiple source files until target length is reached
-    Similar to DNS Challenge's build_audio function
+    Pick a random audio file and clip it to target length
+    Optionally check for activity to skip silent clips
 
     Args:
         source_files: List of source audio files
-        target_length: Target length in samples
-        sample_rate: Sample rate
+        sample_rate: Target sample rate
+        target_length_sec: Target length in seconds
         device: Device to use
-        activity_threshold: Minimum activity threshold
-        debug: Enable debug output
+        activity_threshold: Minimum activity level (0.0 = no check)
+        max_tries: Maximum number of files to try
 
     Returns:
-        concatenated audio, list of files used, or (None, []) if failed
+        audio clip of exactly target_length_sec, or None if failed after max_tries
     """
-    output_audio = torch.zeros(0, device=device)
-    files_used = []
-    remaining_length = target_length
+    for _ in range(max_tries):
+        # Pick random file
+        file_path = random.choice(source_files)
 
-    max_tries = 50
-    tries = 0
-    idx = random.randint(0, len(source_files) - 1)
-
-    while remaining_length > 0 and tries < max_tries:
-        # Pick next file
-        idx = (idx + 1) % len(source_files)
-
-        # Load audio
-        audio = load_audio_file(source_files[idx], sample_rate, device, debug)
+        # Try to load and clip
+        audio = load_and_clip_audio(file_path, sample_rate, target_length_sec, device)
 
         if audio is None:
-            tries += 1
             continue
 
-        # Subsample if longer than needed
-        if len(audio) > remaining_length:
-            start_idx = random.randint(0, len(audio) - remaining_length)
-            audio = audio[start_idx:start_idx + remaining_length]
+        # Check activity if threshold is set
+        if activity_threshold > 0.0:
+            activity = activitydetector(audio, sample_rate)
+            if activity < activity_threshold:
+                continue  # Skip silent clips
 
-        # Concatenate
-        output_audio = torch.cat([output_audio, audio])
-        files_used.append(source_files[idx])
-        remaining_length -= len(audio)
+        return audio
 
-        # Add small silence if not done
-        if remaining_length > 0:
-            silence_len = min(remaining_length, int(0.1 * sample_rate))  # 100ms max
-            output_audio = torch.cat([output_audio, torch.zeros(silence_len, device=device)])
-            remaining_length -= silence_len
-
-    if remaining_length > 0:
-        # Failed to build complete audio
-        if debug:
-            tqdm.write(f"    Failed to build complete audio: remaining={remaining_length}/{target_length}")
-        return None, []
-
-    # Check activity
-    if activity_threshold > 0.0:
-        activity = activitydetector(output_audio, sample_rate)
-        if activity < activity_threshold:
-            if debug:
-                tqdm.write(f"    Activity too low: {activity:.3f} < {activity_threshold}")
-            return None, []
-
-    return output_audio, files_used
+    return None
 
 
 def convert_to_stft(waveform, stft_transform):
@@ -316,14 +271,15 @@ def process_dns_sample(
     target_level=-25,
     clean_activity_threshold=0.5,
     noise_activity_threshold=0.0,
-    debug=False
+    sample_counter=0
 ):
     """
-    Process a single DNS sample:
-    1. Create noisy-mic (clean + noise)
-    2. Create triplet in memory (noisy-mic, silence, clean)
-    3. Transform to STFT
-    4. Save as single .pt file with hash-based unique sample_id
+    SIMPLIFIED: Process a single DNS sample
+    1. Pick random clean audio (10 seconds) with activity check
+    2. Pick random noise audio (10 seconds) with activity check
+    3. Mix them with random SNR
+    4. Transform to STFT
+    5. Save as .pt file
 
     Args:
         clean_files: List of clean audio files
@@ -331,116 +287,69 @@ def process_dns_sample(
         output_dir: Output directory
         stft_transform: STFT transform
         sample_rate: Sample rate
-        chunk_length_sec: Chunk length in seconds
+        chunk_length_sec: Chunk length in seconds (10.0)
         device: Device to use
         snr_lower: Lower SNR bound (dB)
         snr_upper: Upper SNR bound (dB)
         target_level: Target level (dB)
-        clean_activity_threshold: Activity threshold for clean
-        noise_activity_threshold: Activity threshold for noise
-        debug: Enable debug output
+        clean_activity_threshold: Min activity for clean (0.5 = 50%)
+        noise_activity_threshold: Min activity for noise (0.0 = any)
+        sample_counter: Sample number for unique ID
 
     Returns:
         True if successful, False otherwise
     """
     output_dir = Path(output_dir)
-    chunk_samples = int(chunk_length_sec * sample_rate)
 
-    max_tries = 10
-    for attempt in range(max_tries):
-        # Build clean speech
-        clean, clean_files_used = build_audio_from_sources(
-            clean_files,
-            chunk_samples,
-            sample_rate,
-            device,
-            clean_activity_threshold,
-            debug
-        )
+    # Step 1: Get random clean audio clip (exactly 10 seconds) with activity check
+    clean = get_random_audio_clip(clean_files, sample_rate, chunk_length_sec, device,
+                                   activity_threshold=clean_activity_threshold)
+    if clean is None:
+        return False
 
-        if clean is None:
-            if debug:
-                tqdm.write(f"  Attempt {attempt+1}: Failed to build clean audio")
-            continue
+    # Step 2: Get random noise audio clip (exactly 10 seconds)
+    noise = get_random_audio_clip(noise_files, sample_rate, chunk_length_sec, device,
+                                   activity_threshold=noise_activity_threshold)
+    if noise is None:
+        return False
 
-        # Build noise (same length as clean)
-        noise, noise_files_used = build_audio_from_sources(
-            noise_files,
-            len(clean),
-            sample_rate,
-            device,
-            noise_activity_threshold,
-            debug
-        )
+    # Step 3: Mix with random SNR
+    snr = random.randint(snr_lower, snr_upper)
+    clean_scaled, noise_scaled, noisy, _ = segmental_snr_mixer(
+        clean, noise, snr, target_level
+    )
 
-        if noise is None:
-            if debug:
-                tqdm.write(f"  Attempt {attempt+1}: Failed to build noise audio")
-            continue
+    # Step 4: Create triplet (noisy-mic, silence, clean-target)
+    noisy_mic = noisy.to(device)
+    farend = torch.zeros_like(clean_scaled).to(device)
+    target = clean_scaled.to(device)
 
-        # Random SNR
-        snr = random.randint(snr_lower, snr_upper)
+    # Step 5: Transform to STFT
+    try:
+        noisy_mic_stft = convert_to_stft(noisy_mic, stft_transform)
+        farend_stft = convert_to_stft(farend, stft_transform)
+        target_stft = convert_to_stft(target, stft_transform)
+    except Exception:
+        return False
 
-        # Step 1: Mix clean and noise to create noisy-mic
-        clean_scaled, noise_scaled, noisy, target_level_used = segmental_snr_mixer(
-            clean, noise, snr, target_level
-        )
+    # Step 6: Save
+    output_id = f"dns_nearend_{sample_counter:06d}_snr{snr:+03d}"
+    output_file = output_dir / f"{output_id}.pt"
 
-        # Check for clipping
-        if is_clipped(clean_scaled) or is_clipped(noise_scaled) or is_clipped(noisy):
-            if debug:
-                tqdm.write(f"  Attempt {attempt+1}: Clipping detected after mixing")
-            continue
+    try:
+        torch.save({
+            'noisy_mic': noisy_mic_stft,
+            'farend': farend_stft,
+            'target': target_stft,
+            'sample_id': output_id
+        }, output_file)
 
-        # Step 2: Create triplet in memory
-        # - noisy_mic: clean + noise
-        # - farend: silence (no echo)
-        # - target: clean speech
-        noisy_mic = noisy.to(device)
-        farend = torch.zeros_like(clean_scaled).to(device)
-        target = clean_scaled.to(device)
+        return True
 
-        # Step 3: Transform all three to STFT
-        try:
-            noisy_mic_stft = convert_to_stft(noisy_mic, stft_transform)
-            farend_stft = convert_to_stft(farend, stft_transform)
-            target_stft = convert_to_stft(target, stft_transform)
-        except Exception as e:
-            if debug:
-                tqdm.write(f"  Attempt {attempt+1}: STFT transform failed: {e}")
-            continue
-
-        source_string = '|'.join(sorted(clean_files_used)) + '|' + \
-                       '|'.join(sorted(noise_files_used)) + f'|snr{snr}'
-
-        hash_id = hashlib.sha256(source_string.encode()).hexdigest()[:12]
-        output_id = f"dns_nearend_{hash_id}"
-        output_file = output_dir / f"{output_id}.pt"
-
-        try:
-            torch.save({
-                'noisy_mic': noisy_mic_stft,
-                'farend': farend_stft,
-                'target': target_stft,
-                'sample_id': output_id
-            }, output_file)
-
-            # Verify
-            _ = torch.load(output_file, weights_only=False)
-
-            return True
-
-        except Exception as e:
-            if debug:
-                tqdm.write(f"  Attempt {attempt+1}: Failed to save file: {e}")
-            if output_file.exists():
-                output_file.unlink()
-            continue
-
-    # Failed after max tries
-    if debug:
-        tqdm.write(f"  Failed after {max_tries} attempts")
-    return False
+    except Exception:
+        if output_file.exists():
+            output_file.unlink()
+        return False
 
 
 def preprocess_dns_nearend_singletalk(
@@ -462,8 +371,15 @@ def preprocess_dns_nearend_singletalk(
     seed=42
 ):
     """
-    Pre-process DNS Challenge dataset for nearend single talk
+    SIMPLIFIED: Pre-process DNS Challenge dataset for nearend single talk
     Directly outputs STFT-encoded .pt files (no intermediate WAV files)
+
+    SIMPLIFIED LOGIC:
+    1. Pick random clean audio file >= 10 seconds, clip to exactly 10 seconds
+    2. Check activity level (skip if too silent)
+    3. Pick random noise audio file >= 10 seconds, clip to exactly 10 seconds
+    4. Mix them with random SNR
+    5. Save STFT triplet to .pt file
 
     Args:
         clean_dir: Directory containing clean speech files
@@ -474,12 +390,12 @@ def preprocess_dns_nearend_singletalk(
         hop_length: Hop length
         win_length: Window length
         sample_rate: Target sample rate
-        chunk_length_sec: Chunk length in seconds
+        chunk_length_sec: Chunk length in seconds (must be 10.0)
         snr_lower: Lower SNR bound (dB)
         snr_upper: Upper SNR bound (dB)
         target_level: Target level (dB)
-        clean_activity_threshold: Activity threshold for clean speech
-        noise_activity_threshold: Activity threshold for noise
+        clean_activity_threshold: Min activity for clean (0.5 = skip silent clips)
+        noise_activity_threshold: Min activity for noise (0.0 = accept all)
         use_compile: Use torch.compile for faster STFT
         seed: Random seed for reproducibility
     """
@@ -502,7 +418,7 @@ def preprocess_dns_nearend_singletalk(
         device_name = 'CPU'
 
     print(f"{'='*80}")
-    print(f"DNS Challenge Dataset Preprocessing")
+    print(f"DNS Challenge Dataset Preprocessing (SIMPLIFIED)")
     print(f"Mode: Nearend Single Talk (Clean + Noise, Direct STFT output)")
     print(f"{'='*80}")
     print(f"Clean directory: {clean_dir}")
@@ -511,14 +427,14 @@ def preprocess_dns_nearend_singletalk(
     print(f"Device: {device_name}")
     print(f"STFT config: n_fft={n_fft}, hop={hop_length}, win={win_length}")
     print(f"Sample rate: {sample_rate} Hz")
-    print(f"Chunk length: {chunk_length_sec} seconds")
-    print(f"  - Clips > 10s: trimmed to 10s (first 10 seconds)")
-    print(f"  - Clips 8-10s: padded to 10s")
-    print(f"  - Clips < 8s: skipped")
+    print(f"Chunk length: {chunk_length_sec} seconds (exactly)")
+    print(f"  - Files >= 10s: clip to exactly 10 seconds")
+    print(f"  - Files < 10s: skipped")
+    print(f"Activity thresholds:")
+    print(f"  - Clean: {clean_activity_threshold} (skip silent clips)")
+    print(f"  - Noise: {noise_activity_threshold} (accept all)")
     print(f"SNR range: [{snr_lower}, {snr_upper}] dB")
     print(f"Target level: {target_level} dB")
-    print(f"Clean activity threshold: {clean_activity_threshold}")
-    print(f"Noise activity threshold: {noise_activity_threshold}")
     print(f"Samples to generate: {num_samples}")
     print(f"Random seed: {seed}")
 
@@ -573,9 +489,6 @@ def preprocess_dns_nearend_singletalk(
     failed = 0
 
     for i in tqdm(range(num_samples), desc="Generating DNS samples"):
-        # Enable debug for first 3 failed samples
-        debug = (failed < 3)
-
         success = process_dns_sample(
             clean_files=clean_files,
             noise_files=noise_files,
@@ -589,14 +502,15 @@ def preprocess_dns_nearend_singletalk(
             target_level=target_level,
             clean_activity_threshold=clean_activity_threshold,
             noise_activity_threshold=noise_activity_threshold,
-            debug=debug
+            sample_counter=successful
         )
 
         if success:
             successful += 1
         else:
             failed += 1
-            tqdm.write(f"Failed to generate sample {i}")
+            if failed <= 5:  # Show first 5 failures
+                tqdm.write(f"Failed to generate sample {i} (not enough suitable audio files)")
 
     print(f"\n{'='*80}")
     print(f"Preprocessing Complete!")
@@ -666,9 +580,9 @@ if __name__ == "__main__":
     parser.add_argument('--target-level', type=int, default=-25,
                         help='Target level (dB)')
     parser.add_argument('--clean-activity', type=float, default=0.5,
-                        help='Clean speech activity threshold (0.0-1.0)')
+                        help='Clean speech activity threshold (0.0-1.0, default 0.5)')
     parser.add_argument('--noise-activity', type=float, default=0.0,
-                        help='Noise activity threshold (0.0-1.0)')
+                        help='Noise activity threshold (0.0-1.0, default 0.0)')
     parser.add_argument('--no-compile', action='store_true',
                         help='Disable torch.compile optimization')
     parser.add_argument('--seed', type=int, default=42,
