@@ -142,6 +142,12 @@ BLOB_NAMES=(
     # clean_fullband/datasets_fullband.clean_fullband.vctk_wav48_silence_trimmed_002.tar.bz2
     # clean_fullband/datasets_fullband.clean_fullband.vctk_wav48_silence_trimmed_003.tar.bz2
     # clean_fullband/datasets_fullband.clean_fullband.vctk_wav48_silence_trimmed_004.tar.bz2
+    noise_fullband/datasets_fullband.noise_fullband.audioset_000.tar.bz2
+    noise_fullband/datasets_fullband.noise_fullband.audioset_001.tar.bz2
+    noise_fullband/datasets_fullband.noise_fullband.audioset_002.tar.bz2
+    noise_fullband/datasets_fullband.noise_fullband.freesound_000.tar.bz2
+    noise_fullband/datasets_fullband.noise_fullband.freesound_001.tar.bz2
+    datasets_fullband.impulse_responses_000.tar.bz2
 )
 
 ###############################################################
@@ -150,28 +156,57 @@ BLOB_NAMES=(
 
 AZURE_URL="https://dns4public.blob.core.windows.net/dns4archive/datasets_fullband"
 OUTPUT_PATH="./datasets_fullband"
+EXTRACT_PATH="./dns_data"
 
 # Configuration
 DRY_RUN=${DRY_RUN:-true}  # Set to false to actually download
 AUTO_EXTRACT=${AUTO_EXTRACT:-false}  # Set to true to auto-extract after download
+DELETE_AFTER_EXTRACT=${DELETE_AFTER_EXTRACT:-false}  # Delete archive after successful extraction
 
-# Check if azcopy is installed
+# Check if required tools are installed
 if ! command -v azcopy &> /dev/null; then
     echo "Error: azcopy is not installed"
     echo "Please install azcopy first. See: install_azcopy.sh"
     exit 1
 fi
 
-# Create output directory
+if [ "$AUTO_EXTRACT" = true ]; then
+    if ! command -v pv &> /dev/null; then
+        echo "Warning: pv is not installed. Install with: brew install pv (macOS) or apt install pv (Linux)"
+        echo "Falling back to extraction without progress bar"
+        USE_PV=false
+    else
+        USE_PV=true
+    fi
+
+    # Note: For bzip2 archives, we use pbzip2 (parallel bzip2) instead of pigz
+    if ! command -v pbzip2 &> /dev/null; then
+        echo "Warning: pbzip2 is not installed. Install with: brew install pbzip2 (macOS) or apt install pbzip2 (Linux)"
+        echo "Falling back to single-threaded bzip2 decompression"
+        USE_PIGZ=false
+    else
+        USE_PIGZ=true
+    fi
+fi
+
+# Create output directories
 mkdir -p "$OUTPUT_PATH/clean_fullband"
+mkdir -p "$EXTRACT_PATH/dns_clean"
+mkdir -p "$EXTRACT_PATH/dns_noise"
 
 echo "=========================================="
 echo "DNS4 Dataset Download using AzCopy"
 echo "=========================================="
 echo "Total files to download: ${#BLOB_NAMES[@]}"
-echo "Output path: $OUTPUT_PATH"
+echo "Download path: $OUTPUT_PATH"
+echo "Extract path: $EXTRACT_PATH"
 echo "DRY RUN: $DRY_RUN"
 echo "Auto-extract: $AUTO_EXTRACT"
+if [ "$AUTO_EXTRACT" = true ]; then
+    echo "Use pv: $USE_PV"
+    echo "Use pigz: $USE_PIGZ"
+    echo "Delete after extract: $DELETE_AFTER_EXTRACT"
+fi
 echo "=========================================="
 echo ""
 
@@ -198,37 +233,76 @@ for BLOB in "${BLOB_NAMES[@]}"; do
         echo "  Status: DRY RUN (no actual download)"
         SUCCESS=$((SUCCESS + 1))
     else
+        # Determine target directory based on filename (for skip check)
+        if [[ "$FILENAME" =~ clean ]]; then
+            TARGET_DIR="$EXTRACT_PATH/dns_clean"
+        elif [[ "$FILENAME" =~ noise ]]; then
+            TARGET_DIR="$EXTRACT_PATH/dns_noise"
+        else
+            TARGET_DIR="$EXTRACT_PATH/dns_clean"
+        fi
+
         # Create subdirectory if needed
         mkdir -p "$(dirname "$OUTPUT_FILE")"
+        mkdir -p "$TARGET_DIR"
 
-        # Check if file already exists
+        # Skip if archive already exists
         if [ -f "$OUTPUT_FILE" ]; then
-            echo "  Status: File already exists, skipping..."
+            echo "  Status: Archive already exists, skipping..."
             SUCCESS=$((SUCCESS + 1))
         else
-            # Actually download using azcopy
-            # --overwrite=false prevents re-downloading existing files
-            # --output-level=essential keeps output cleaner
+            # Download using azcopy
             if azcopy copy "$URL" "$OUTPUT_FILE" \
                 --overwrite=false \
                 --output-level=essential \
                 --check-length=true; then
-                echo "  Status: SUCCESS"
+                echo "  Status: Download SUCCESS"
                 SUCCESS=$((SUCCESS + 1))
 
                 # Auto-extract if enabled
                 if [ "$AUTO_EXTRACT" = true ]; then
-                    echo "  Extracting..."
-                    if tar -xjf "$OUTPUT_FILE" -C "$OUTPUT_PATH"; then
+                    echo "  Extracting to: $TARGET_DIR"
+
+                    # Get file size for progress bar
+                    FILE_SIZE=$(stat -f%z "$OUTPUT_FILE" 2>/dev/null || stat -c%s "$OUTPUT_FILE" 2>/dev/null)
+
+                    # Extract with pv and pigz if available
+                    EXTRACT_SUCCESS=false
+                    if [ "$USE_PV" = true ] && [ "$USE_PIGZ" = true ]; then
+                        # Most efficient: pv + pigz (parallel bzip2) + tar
+                        # Note: pigz doesn't natively support bzip2, so we use pbzip2 if available
+                        if command -v pbzip2 &> /dev/null; then
+                            pv -s "$FILE_SIZE" "$OUTPUT_FILE" | pbzip2 -dc | tar -xC "$TARGET_DIR" && EXTRACT_SUCCESS=true
+                        else
+                            # Fallback to regular bzip2 with pv
+                            pv -s "$FILE_SIZE" "$OUTPUT_FILE" | bzip2 -dc | tar -xC "$TARGET_DIR" && EXTRACT_SUCCESS=true
+                        fi
+                    elif [ "$USE_PV" = true ]; then
+                        # pv only (no parallel decompression)
+                        pv -s "$FILE_SIZE" "$OUTPUT_FILE" | bzip2 -dc | tar -xC "$TARGET_DIR" && EXTRACT_SUCCESS=true
+                    else
+                        # No progress bar, standard extraction
+                        if command -v pbzip2 &> /dev/null; then
+                            pbzip2 -dc "$OUTPUT_FILE" | tar -xC "$TARGET_DIR" && EXTRACT_SUCCESS=true
+                        else
+                            tar -xjf "$OUTPUT_FILE" -C "$TARGET_DIR" && EXTRACT_SUCCESS=true
+                        fi
+                    fi
+
+                    if [ "$EXTRACT_SUCCESS" = true ]; then
                         echo "  Extraction: SUCCESS"
-                        # Optionally remove the archive after extraction
-                        # rm "$OUTPUT_FILE"
+                        # Remove archive if requested
+                        if [ "$DELETE_AFTER_EXTRACT" = true ]; then
+                            rm "$OUTPUT_FILE"
+                            echo "  Deleted archive: $FILENAME"
+                        fi
                     else
                         echo "  Extraction: FAILED"
+                        FAILED=$((FAILED + 1))
                     fi
                 fi
             else
-                echo "  Status: FAILED"
+                echo "  Status: Download FAILED"
                 FAILED=$((FAILED + 1))
             fi
         fi
@@ -247,10 +321,17 @@ echo "=========================================="
 if [ "$DRY_RUN" = true ]; then
     echo ""
     echo "This was a DRY RUN. To actually download files:"
-    echo "  DRY_RUN=false $0"
+    echo "  DRY_RUN=false bash $0"
     echo ""
     echo "To download and auto-extract:"
-    echo "  DRY_RUN=false AUTO_EXTRACT=true $0"
+    echo "  DRY_RUN=false AUTO_EXTRACT=true bash $0"
+    echo ""
+    echo "To download, extract, and delete archives:"
+    echo "  DRY_RUN=false AUTO_EXTRACT=true DELETE_AFTER_EXTRACT=true bash $0"
+    echo ""
+    echo "For best performance, install pv and pbzip2:"
+    echo "  macOS: brew install pv pbzip2"
+    echo "  Linux: apt install pv pbzip2"
 fi
 
 exit 0
