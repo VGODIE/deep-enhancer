@@ -81,16 +81,19 @@ def load_and_convert_to_stft(
     file_path,
     stft_transform,
     sample_rate=24000,
-    chunk_length_sec=10.0
+    chunk_length_sec=10.0,
+    device='cpu'
 ):
     """
     Load audio and convert to STFT format (same logic as preprocess_dataset.py)
+    Now with GPU acceleration support
 
     Args:
         file_path: Path to audio file
         stft_transform: STFT transform object
         sample_rate: Target sample rate
         chunk_length_sec: Target chunk length in seconds (10.0)
+        device: Device to use for computation ('cuda', 'cpu')
 
     Returns:
         stft_complex: STFT tensor of shape (F, T, 2) [real, imag], or None if too short
@@ -98,13 +101,16 @@ def load_and_convert_to_stft(
     # Load audio
     waveform, sr = torchaudio.load(file_path)
 
+    # Move to device for GPU acceleration
+    waveform = waveform.to(device)
+
     # Mono conversion
     if waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
 
     # Resample if needed
     if sr != sample_rate:
-        resampler = torchaudio.transforms.Resample(sr, sample_rate)
+        resampler = torchaudio.transforms.Resample(sr, sample_rate).to(device)
         waveform = resampler(waveform)
 
     waveform = waveform.squeeze(0)
@@ -123,13 +129,14 @@ def load_and_convert_to_stft(
         # Pad if slightly too short (but >= 8 seconds)
         waveform = torch.nn.functional.pad(waveform, (0, chunk_samples - waveform.shape[0]))
 
-    # Compute STFT
+    # Compute STFT (on GPU if available)
     stft = stft_transform(waveform)  # Complex tensor (F, T)
 
     # Convert to (F, T, 2) format [real, imag]
     stft_complex = torch.stack([stft.real, stft.imag], dim=-1)
 
-    return stft_complex
+    # Move back to CPU for saving
+    return stft_complex.cpu()
 
 
 def create_silence_stft(reference_stft):
@@ -152,6 +159,7 @@ def process_farend_singletalk(
     stft_transform,
     sample_rate,
     chunk_length_sec,
+    device='cpu',
     include_movement=True
 ):
     """
@@ -164,6 +172,7 @@ def process_farend_singletalk(
         stft_transform: STFT transform object
         sample_rate: Sample rate
         chunk_length_sec: Chunk length in seconds
+        device: Device to use for computation
         include_movement: Include samples with movement
 
     Returns:
@@ -192,12 +201,12 @@ def process_farend_singletalk(
             scenario_suffix = scenario.replace('farend-singletalk', 'farend')
             output_id = f"{sample_id}_{scenario_suffix}"
 
-            # Convert to STFT
+            # Convert to STFT (with GPU acceleration)
             mic_stft = load_and_convert_to_stft(
-                mic_path, stft_transform, sample_rate, chunk_length_sec
+                mic_path, stft_transform, sample_rate, chunk_length_sec, device
             )
             farend_stft = load_and_convert_to_stft(
-                lpb_path, stft_transform, sample_rate, chunk_length_sec
+                lpb_path, stft_transform, sample_rate, chunk_length_sec, device
             )
 
             # Check if any are too short (None returned)
@@ -208,15 +217,25 @@ def process_farend_singletalk(
             target_stft = create_silence_stft(mic_stft)
 
             # Save as single .pt file (same format as preprocess_dataset.py)
+            # Wrap in try-except to skip corrupted files
             output_file = output_dir / f"{output_id}.pt"
-            torch.save({
-                'noisy_mic': mic_stft,
-                'farend': farend_stft,
-                'target': target_stft,
-                'sample_id': output_id
-            }, output_file)
+            try:
+                torch.save({
+                    'noisy_mic': mic_stft,
+                    'farend': farend_stft,
+                    'target': target_stft,
+                    'sample_id': output_id
+                }, output_file)
 
-            created_samples.append(output_id)
+                # Verify file can be loaded back
+                _ = torch.load(output_file, weights_only=False)
+
+                created_samples.append(output_id)
+            except Exception as save_error:
+                # Failed to save or verify - skip this sample
+                if output_file.exists():
+                    output_file.unlink()  # Clean up partial file
+                continue
 
     return created_samples
 
@@ -229,11 +248,13 @@ def preprocess_aec_farend_singletalk(
     win_length=512,
     sample_rate=24000,
     chunk_length_sec=10.0,
-    include_movement=True
+    include_movement=True,
+    use_compile=True
 ):
     """
     Pre-process AEC Challenge 2023 dataset (farend single talk only)
     Directly outputs STFT-encoded .pt files
+    Now with GPU acceleration and torch.compile support!
 
     Args:
         aec_data_dir: Directory containing AEC Challenge WAV files
@@ -244,10 +265,22 @@ def preprocess_aec_farend_singletalk(
         sample_rate: Target sample rate (24kHz as per DeepVQE paper)
         chunk_length_sec: Chunk length in seconds (10.0 default)
         include_movement: Include samples with movement (default: True)
+        use_compile: Use torch.compile for faster STFT (default: True, requires PyTorch 2.0+)
     """
     aec_data_dir = Path(aec_data_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
+
+    # Auto-detect device (CUDA, MPS, or CPU)
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        device_name = torch.cuda.get_device_name(0)
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+        device_name = 'Apple Silicon (MPS)'
+    else:
+        device = torch.device('cpu')
+        device_name = 'CPU'
 
     print(f"{'='*80}")
     print(f"Microsoft AEC Challenge 2023 Dataset Preprocessing")
@@ -255,6 +288,7 @@ def preprocess_aec_farend_singletalk(
     print(f"{'='*80}")
     print(f"Input directory: {aec_data_dir}")
     print(f"Output directory: {output_dir}")
+    print(f"Device: {device_name}")
     print(f"STFT config: n_fft={n_fft}, hop={hop_length}, win={win_length}")
     print(f"Sample rate: {sample_rate} Hz")
     print(f"Chunk length: {chunk_length_sec} seconds")
@@ -270,7 +304,18 @@ def preprocess_aec_farend_singletalk(
         hop_length=hop_length,
         power=None,
         return_complex=True
-    )
+    ).to(device)
+
+    # Apply torch.compile for faster execution (PyTorch 2.0+)
+    if use_compile:
+        try:
+            stft_transform = torch.compile(stft_transform, mode='reduce-overhead')
+            print(f"torch.compile: Enabled (faster processing!)")
+        except Exception as e:
+            print(f"torch.compile: Not available (requires PyTorch 2.0+), using standard mode")
+            use_compile = False
+    else:
+        print(f"torch.compile: Disabled")
 
     # Group files by sample ID
     print("\nGrouping files by sample ID...")
@@ -293,11 +338,11 @@ def preprocess_aec_farend_singletalk(
 
     for sample_id, scenarios in tqdm(samples.items(), desc="Converting WAV to STFT"):
         try:
-            # Process farend singletalk
+            # Process farend singletalk (with device for GPU acceleration)
             farend_samples = process_farend_singletalk(
                 sample_id, scenarios, output_dir,
                 stft_transform, sample_rate, chunk_length_sec,
-                include_movement
+                device, include_movement
             )
 
             if len(farend_samples) == 0:
@@ -313,7 +358,7 @@ def preprocess_aec_farend_singletalk(
             all_created.extend(farend_samples)
 
         except Exception as e:
-            tqdm.write(f"Error processing {sample_id}: {e}")
+            tqdm.write(f"Error processing {sample_id}: {str(e)[:100]}")
             stats['failed'] += 1
 
     print(f"\n{'='*80}")
@@ -380,6 +425,8 @@ if __name__ == "__main__":
                         help='Chunk length in seconds (10 sec default)')
     parser.add_argument('--no_movement', action='store_true',
                         help='Exclude samples with movement')
+    parser.add_argument('--no_compile', action='store_true',
+                        help='Disable torch.compile optimization')
 
     args = parser.parse_args()
 
@@ -391,5 +438,6 @@ if __name__ == "__main__":
         win_length=args.win_length,
         sample_rate=args.sample_rate,
         chunk_length_sec=args.chunk_sec,
-        include_movement=not args.no_movement
+        include_movement=not args.no_movement,
+        use_compile=not args.no_compile
     )
