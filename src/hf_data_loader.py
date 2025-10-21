@@ -11,12 +11,12 @@ def upload_folder_to_hf(local_folder_path, hf_repo_id, hf_repo_type):
         repo_type=hf_repo_type,
     )
 
-def upload_file_to_hf(local_file_path, hf_repo_id, hf_repo_type):
+def upload_file_to_hf(local_file_path, hf_repo_id, hf_repo_type, remote_filpath):
     load_dotenv()
     api = HfApi(token=os.getenv("HF_TOKEN"))
     api.upload_file(
         path_or_fileobj=local_file_path,
-        path_in_repo="dataset.tar.gz",
+        path_in_repo=remote_filpath,
         repo_id=hf_repo_id,
         repo_type=hf_repo_type
     )
@@ -84,7 +84,7 @@ if __name__ == '__main__':
                         help='Type of repository')
     parser.add_argument('--local-path', type=str,
                         help='Local file/folder path (for uploads) or local directory (for downloads)')
-    parser.add_argument('--filename', type=str,
+    parser.add_argument('--remote-filepath', type=str,
                         help='Filename to download from the repository (for download-file action)')
     args = parser.parse_args()
 
@@ -95,11 +95,11 @@ if __name__ == '__main__':
     elif args.action == 'upload-file':
         if not args.local_path:
             parser.error('--local-path is required for upload-file')
-        upload_file_to_hf(args.local_path, args.repo_id, args.repo_type)
+        upload_file_to_hf(args.local_path, args.repo_id, args.repo_typ, args.remote_filepath)
     elif args.action == 'download-file':
         if not args.filename:
             parser.error('--filename is required for download-file')
-        download_file_from_hf(args.filename, args.repo_id, args.repo_type, args.local_path)
+        download_file_from_hf(args.remote_filepath, args.repo_id, args.repo_type, args.local_path)
     elif args.action == 'download-repo':
         download_repo_from_hf(args.repo_id, args.repo_type, args.local_path)
 

@@ -409,29 +409,29 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Preprocess Microsoft AEC Challenge 2023 dataset (farend singletalk, direct STFT output)'
     )
-    parser.add_argument('--aec_data_dir', type=str, required=True,
+    parser.add_argument('--data-dir', type=str, required=True,
                         help='Input directory with AEC Challenge WAV files')
-    parser.add_argument('--output_dir', type=str, default='./data_stft',
+    parser.add_argument('--output-dir', type=str, default='./data_stft',
                         help='Output directory for STFT .pt files')
-    parser.add_argument('--n_fft', type=int, default=512,
+    parser.add_argument('--n-fft', type=int, default=512,
                         help='FFT size')
-    parser.add_argument('--hop_length', type=int, default=128,
+    parser.add_argument('--hop-length', type=int, default=128,
                         help='Hop length')
-    parser.add_argument('--win_length', type=int, default=512,
+    parser.add_argument('--win-length', type=int, default=512,
                         help='Window length')
-    parser.add_argument('--sample_rate', type=int, default=24000,
+    parser.add_argument('--sample-rate', type=int, default=24000,
                         help='Target sample rate (24kHz)')
-    parser.add_argument('--chunk_sec', type=float, default=10.0,
+    parser.add_argument('--chunk-sec', type=float, default=10.0,
                         help='Chunk length in seconds (10 sec default)')
-    parser.add_argument('--no_movement', action='store_true',
+    parser.add_argument('--no-movement', action='store_true',
                         help='Exclude samples with movement')
-    parser.add_argument('--no_compile', action='store_true',
+    parser.add_argument('--no-compile', action='store_true',
                         help='Disable torch.compile optimization')
 
     args = parser.parse_args()
 
     preprocess_aec_farend_singletalk(
-        aec_data_dir=args.aec_data_dir,
+        aec_data_dir=args.data_dir,
         output_dir=args.output_dir,
         n_fft=args.n_fft,
         hop_length=args.hop_length,
