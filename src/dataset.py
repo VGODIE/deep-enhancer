@@ -233,7 +233,7 @@ def create_dataloaders_wds(
         print(f"Train: {train_tar_pattern}, Val: {val_tar_pattern}")
 
     train_dataset = (
-        wds.WebDataset(train_urls, cache_dir=cache_dir, shardshuffle=True)
+        wds.WebDataset(train_urls, cache_dir=cache_dir, shardshuffle=True, empty_check=False)
         .shuffle(1000)
         .decode()
         .map(decode_sample)
@@ -242,7 +242,7 @@ def create_dataloaders_wds(
     )
 
     val_dataset = (
-        wds.WebDataset(val_urls, cache_dir=cache_dir, shardshuffle=False)
+        wds.WebDataset(val_urls, cache_dir=cache_dir, shardshuffle=False, empty_check=False)
         .decode()
         .map(decode_sample)
         .select(lambda x: x is not None)
