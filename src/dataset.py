@@ -172,10 +172,49 @@ def create_dataloaders_wds(
 
     # Determine if using local files or HuggingFace Hub
     if hf_repo_id is None:
-        # Local mode
+        # Local mode - expand glob patterns
+        import glob
         print("Creating WebDataset from local tar files")
-        train_urls = train_tar_pattern if isinstance(train_tar_pattern, (list, str)) else train_tar_pattern
-        val_urls = val_tar_pattern if isinstance(val_tar_pattern, (list, str)) else val_tar_pattern
+
+        if isinstance(train_tar_pattern, str):
+            train_urls = sorted(glob.glob(train_tar_pattern))
+            if not train_urls:
+                raise FileNotFoundError(f"No files found matching pattern: {train_tar_pattern}")
+        else:
+            train_urls = []
+            for pattern in train_tar_pattern:
+                matched = sorted(glob.glob(pattern))
+                if not matched:
+                    print(f"Warning: No files found for pattern: {pattern}")
+                train_urls.extend(matched)
+            if not train_urls:
+                raise FileNotFoundError(f"No files found matching any patterns: {train_tar_pattern}")
+
+        if isinstance(val_tar_pattern, str):
+            val_urls = sorted(glob.glob(val_tar_pattern))
+            if not val_urls:
+                raise FileNotFoundError(f"No files found matching pattern: {val_tar_pattern}")
+        else:
+            val_urls = []
+            for pattern in val_tar_pattern:
+                matched = sorted(glob.glob(pattern))
+                if not matched:
+                    print(f"Warning: No files found for pattern: {pattern}")
+                val_urls.extend(matched)
+            if not val_urls:
+                raise FileNotFoundError(f"No files found matching any patterns: {val_tar_pattern}")
+
+        print(f"Found {len(train_urls)} training tar files:")
+        for f in train_urls[:5]:
+            print(f"  - {f}")
+        if len(train_urls) > 5:
+            print(f"  ... and {len(train_urls) - 5} more")
+
+        print(f"Found {len(val_urls)} validation tar files:")
+        for f in val_urls[:5]:
+            print(f"  - {f}")
+        if len(val_urls) > 5:
+            print(f"  ... and {len(val_urls) - 5} more")
     else:
         # HuggingFace Hub mode
         base_url = f"https://huggingface.co/datasets/{hf_repo_id}/resolve/main"
@@ -191,8 +230,7 @@ def create_dataloaders_wds(
             val_urls = [f"{base_url}/{p}" for p in val_tar_pattern]
 
         print(f"Creating WebDataset from HuggingFace Hub: {hf_repo_id}")
-
-    print(f"Train: {train_tar_pattern}, Val: {val_tar_pattern}")
+        print(f"Train: {train_tar_pattern}, Val: {val_tar_pattern}")
 
     train_dataset = (
         wds.WebDataset(train_urls, cache_dir=cache_dir, shardshuffle=True)
