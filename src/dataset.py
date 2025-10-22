@@ -232,27 +232,13 @@ def create_dataloaders_wds(
         print(f"Creating WebDataset from HuggingFace Hub: {hf_repo_id}")
         print(f"Train: {train_tar_pattern}, Val: {val_tar_pattern}")
 
-    def collate_wds_batch(samples):
-        """Collate webdataset batch into stacked tensors"""
-        noisy_mic = torch.stack([s['noisy_mic'] for s in samples])
-        farend = torch.stack([s['farend'] for s in samples])
-        target = torch.stack([s['target'] for s in samples])
-        sample_ids = [s['sample_id'] for s in samples]
-        return {
-            'noisy_mic': noisy_mic,
-            'farend': farend,
-            'target': target,
-            'sample_ids': sample_ids
-        }
-
+    # Don't batch in the dataset - let the DataLoader handle it with collate_fn
     train_dataset = (
         wds.WebDataset(train_urls, cache_dir=cache_dir, shardshuffle=True, empty_check=False)
         .shuffle(1000)
         .decode()
         .map(decode_sample)
         .select(lambda x: x is not None)
-        .batched(batch_size)
-        .map(collate_wds_batch)
     )
 
     val_dataset = (
@@ -260,22 +246,23 @@ def create_dataloaders_wds(
         .decode()
         .map(decode_sample)
         .select(lambda x: x is not None)
-        .batched(batch_size)
-        .map(collate_wds_batch)
     )
 
+    # Use WebLoader with batch_size and collate_fn (same as regular DataLoader)
     train_loader = wds.WebLoader(
         train_dataset,
-        batch_size=None,
+        batch_size=batch_size,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        collate_fn=collate_fn,
     )
 
     val_loader = wds.WebLoader(
         val_dataset,
-        batch_size=None,
+        batch_size=batch_size,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        collate_fn=collate_fn,
     )
 
     print("WebDataset dataloaders created successfully!")
