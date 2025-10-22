@@ -145,7 +145,7 @@ def decode_sample(sample):
 
 
 def create_dataloaders_wds(
-    hf_repo_id,
+    hf_repo_id=None,
     train_tar_pattern='train-*.tar.gz',
     val_tar_pattern='val-*.tar.gz',
     batch_size=4,
@@ -155,12 +155,13 @@ def create_dataloaders_wds(
     cache_dir=None,
 ):
     """
-    Create dataloaders using webdataset from HuggingFace Hub tar.gz archives
-
-    Streams data directly from tar.gz files without downloading entire dataset first.
+    Create dataloaders using webdataset from local or HuggingFace Hub tar.gz archives
 
     Args:
-        train_tar_pattern: String or list of patterns/files (e.g., 'train-*.tar.gz' or ['train-000.tar.gz', 'train-001.tar.gz'])
+        hf_repo_id: HuggingFace repo ID (e.g., 'username/dataset'). If None, uses local paths
+        train_tar_pattern: String or list of patterns/files
+            - For local: './data/train-*.tar.gz' or ['./data/train-000.tar.gz']
+            - For HF: 'train-*.tar.gz' or ['train-000.tar.gz', 'train-001.tar.gz']
         val_tar_pattern: String or list of patterns/files
     """
     from dotenv import load_dotenv
@@ -169,20 +170,28 @@ def create_dataloaders_wds(
     if hf_token is None:
         hf_token = os.getenv("HF_TOKEN")
 
-    base_url = f"https://huggingface.co/datasets/{hf_repo_id}/resolve/main"
-
-    # Handle single pattern or list of patterns/files
-    if isinstance(train_tar_pattern, str):
-        train_urls = f"{base_url}/{train_tar_pattern}"
+    # Determine if using local files or HuggingFace Hub
+    if hf_repo_id is None:
+        # Local mode
+        print("Creating WebDataset from local tar files")
+        train_urls = train_tar_pattern if isinstance(train_tar_pattern, (list, str)) else train_tar_pattern
+        val_urls = val_tar_pattern if isinstance(val_tar_pattern, (list, str)) else val_tar_pattern
     else:
-        train_urls = [f"{base_url}/{p}" for p in train_tar_pattern]
+        # HuggingFace Hub mode
+        base_url = f"https://huggingface.co/datasets/{hf_repo_id}/resolve/main"
 
-    if isinstance(val_tar_pattern, str):
-        val_urls = f"{base_url}/{val_tar_pattern}"
-    else:
-        val_urls = [f"{base_url}/{p}" for p in val_tar_pattern]
+        if isinstance(train_tar_pattern, str):
+            train_urls = f"{base_url}/{train_tar_pattern}"
+        else:
+            train_urls = [f"{base_url}/{p}" for p in train_tar_pattern]
 
-    print(f"Creating WebDataset from {hf_repo_id}")
+        if isinstance(val_tar_pattern, str):
+            val_urls = f"{base_url}/{val_tar_pattern}"
+        else:
+            val_urls = [f"{base_url}/{p}" for p in val_tar_pattern]
+
+        print(f"Creating WebDataset from HuggingFace Hub: {hf_repo_id}")
+
     print(f"Train: {train_tar_pattern}, Val: {val_tar_pattern}")
 
     train_dataset = (

@@ -115,9 +115,10 @@ def train(
         print("Enabling pin_memory for faster CUDA transfers")
 
     if data_mode == 'webdataset':
-        if not hf_repo_id:
-            raise ValueError("hf_repo_id must be provided when data_mode='webdataset'")
-        print(f"Using WebDataset streaming from HuggingFace Hub: {hf_repo_id}")
+        if hf_repo_id:
+            print(f"Using WebDataset streaming from HuggingFace Hub: {hf_repo_id}")
+        else:
+            print("Using WebDataset from local tar files")
         train_loader, val_loader = create_dataloaders_wds(
             hf_repo_id=hf_repo_id,
             train_tar_pattern=train_tar_pattern,
