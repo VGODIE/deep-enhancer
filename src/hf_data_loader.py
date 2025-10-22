@@ -95,7 +95,7 @@ if __name__ == '__main__':
     elif args.action == 'upload-file':
         if not args.local_path:
             parser.error('--local-path is required for upload-file')
-        upload_file_to_hf(args.local_path, args.repo_id, args.repo_typ, args.remote_filepath)
+        upload_file_to_hf(args.local_path, args.repo_id, args.repo_type, args.remote_filepath)
     elif args.action == 'download-file':
         if not args.filename:
             parser.error('--filename is required for download-file')
