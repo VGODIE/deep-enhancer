@@ -127,6 +127,10 @@ def create_dataloaders(
 
 def decode_sample(sample):
     """Decode a sample from webdataset tar archive"""
+    # Skip samples that don't have all required .pt files
+    if 'noisy_mic.pt' not in sample or 'farend.pt' not in sample or 'target.pt' not in sample:
+        return None
+
     sample_id = sample['__key__']
     noisy_mic = torch.load(io.BytesIO(sample['noisy_mic.pt']))
     farend = torch.load(io.BytesIO(sample['farend.pt']))
@@ -186,6 +190,7 @@ def create_dataloaders_wds(
         .shuffle(1000)
         .decode()
         .map(decode_sample)
+        .select(lambda x: x is not None)
         .batched(batch_size)
     )
 
@@ -193,6 +198,7 @@ def create_dataloaders_wds(
         wds.WebDataset(val_urls, cache_dir=cache_dir, shardshuffle=False)
         .decode()
         .map(decode_sample)
+        .select(lambda x: x is not None)
         .batched(batch_size)
     )
 
