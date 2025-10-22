@@ -1,6 +1,9 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
+import webdataset as wds
+import io
+import os
 
 
 class FastDeepVQEDataset(Dataset):
@@ -119,6 +122,95 @@ def create_dataloaders(
     print(f"Train samples: {train_size}, Val samples: {val_size}")
     print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 
+    return train_loader, val_loader
+
+
+def decode_sample(sample):
+    """Decode a sample from webdataset tar archive"""
+    sample_id = sample['__key__']
+    noisy_mic = torch.load(io.BytesIO(sample['noisy_mic.pt']))
+    farend = torch.load(io.BytesIO(sample['farend.pt']))
+    target = torch.load(io.BytesIO(sample['target.pt']))
+
+    return {
+        'noisy_mic': noisy_mic,
+        'farend': farend,
+        'target': target,
+        'sample_id': sample_id
+    }
+
+
+def create_dataloaders_wds(
+    hf_repo_id,
+    train_tar_pattern='train-*.tar.gz',
+    val_tar_pattern='val-*.tar.gz',
+    batch_size=4,
+    num_workers=4,
+    pin_memory=False,
+    hf_token=None,
+    cache_dir=None,
+):
+    """
+    Create dataloaders using webdataset from HuggingFace Hub tar.gz archives
+
+    Streams data directly from tar.gz files without downloading entire dataset first.
+
+    Args:
+        train_tar_pattern: String or list of patterns/files (e.g., 'train-*.tar.gz' or ['train-000.tar.gz', 'train-001.tar.gz'])
+        val_tar_pattern: String or list of patterns/files
+    """
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    if hf_token is None:
+        hf_token = os.getenv("HF_TOKEN")
+
+    base_url = f"https://huggingface.co/datasets/{hf_repo_id}/resolve/main"
+
+    # Handle single pattern or list of patterns/files
+    if isinstance(train_tar_pattern, str):
+        train_urls = f"{base_url}/{train_tar_pattern}"
+    else:
+        train_urls = [f"{base_url}/{p}" for p in train_tar_pattern]
+
+    if isinstance(val_tar_pattern, str):
+        val_urls = f"{base_url}/{val_tar_pattern}"
+    else:
+        val_urls = [f"{base_url}/{p}" for p in val_tar_pattern]
+
+    print(f"Creating WebDataset from {hf_repo_id}")
+    print(f"Train: {train_tar_pattern}, Val: {val_tar_pattern}")
+
+    train_dataset = (
+        wds.WebDataset(train_urls, cache_dir=cache_dir, shardshuffle=True)
+        .shuffle(1000)
+        .decode()
+        .map(decode_sample)
+        .batched(batch_size)
+    )
+
+    val_dataset = (
+        wds.WebDataset(val_urls, cache_dir=cache_dir, shardshuffle=False)
+        .decode()
+        .map(decode_sample)
+        .batched(batch_size)
+    )
+
+    train_loader = wds.WebLoader(
+        train_dataset,
+        batch_size=None,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+
+    val_loader = wds.WebLoader(
+        val_dataset,
+        batch_size=None,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+
+    print("WebDataset dataloaders created successfully!")
     return train_loader, val_loader
 
 

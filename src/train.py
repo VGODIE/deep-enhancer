@@ -5,48 +5,51 @@ import torch
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger
-from dataset import create_dataloaders
+from dataset import create_dataloaders, create_dataloaders_wds
 from trainer import DeepVQETrainer
 from deepvqe import DeepVQE_S
 from hf_hub_utils import HFCheckpointUploader
 import warnings
 import os
+import yaml
 
 warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
 warnings.filterwarnings("ignore", category=UserWarning, module="torchcodec")
 
 def train(
+        data_mode='local',
         data_dir='./data_stft',
+        train_split=0.9,
+        hf_repo_id=None,
+        train_tar_pattern='train-*.tar.gz',
+        val_tar_pattern='val-*.tar.gz',
+        cache_dir=None,
         batch_size=8,
         num_epochs=100,
         learning_rate=1e-4,
         num_workers=4,
         alpha=0.7,
         beta=0.3,
+        experiment_name='default',
         checkpoint_dir='./checkpoints',
         log_dir='./logs',
         accelerator='auto',
         accumulate_gradients=1,
-        hf_repo_id=None,
+        hf_checkpoint_repo_id=None,
         hf_token=None):
     """
-    Pure PyTorch training loop for DeepVQE (without Lightning)
+    Pure PyTorch training loop for DeepVQE
 
     Args:
-        data_dir: Path to pre-computed STFT dataset directory
-        batch_size: Training batch size
-        num_epochs: Number of training epochs
-        learning_rate: Learning rate
-        num_workers: Number of data loading workers
-        alpha: Weight for amplitude loss
-        beta: Weight for phase loss
-        checkpoint_dir: Directory to save checkpoints
-        log_dir: Directory for TensorBoard logs
-        accelerator: 'auto', 'gpu', 'cpu', 'mps', 'cuda'
-        devices: Number of devices to use (only 1 supported in pure PyTorch version)
-        accumulate_gradients: Accumulate gradients over N batches
-        hf_repo_id: Hugging Face repo ID (e.g., 'username/deep-enhancer-checkpoints')
-        hf_token: Hugging Face token (or set HF_TOKEN environment variable)
+        data_mode: 'local' or 'webdataset'
+        data_dir: Path to local STFT dataset (for local mode)
+        train_split: Train/val split ratio (for local mode)
+        hf_repo_id: HuggingFace dataset repo ID (for webdataset mode)
+        train_tar_pattern: Pattern/list for train tar files (for webdataset mode)
+        val_tar_pattern: Pattern/list for val tar files (for webdataset mode)
+        cache_dir: Cache dir for webdataset shards
+        experiment_name: Subdirectory name for this experiment
+        hf_checkpoint_repo_id: HuggingFace repo for checkpoint uploads
     """
     from pathlib import Path
     from torch.utils.tensorboard import SummaryWriter
@@ -59,23 +62,29 @@ def train(
 
     # Setup Hugging Face Hub uploader if repo_id provided
     hf_uploader = None
-    if hf_repo_id:
+    if hf_checkpoint_repo_id:
         try:
             print("\n[HF Hub] Setting up checkpoint auto-upload...")
             hf_uploader = HFCheckpointUploader(
-                repo_id=hf_repo_id,
+                repo_id=hf_checkpoint_repo_id,
                 token=hf_token or os.getenv("HF_TOKEN"),
                 private=True
             )
-            print(f"[HF Hub] ✓ Checkpoints will be uploaded to: https://huggingface.co/{hf_repo_id}")
+            print(f"[HF Hub] ✓ Checkpoints will be uploaded to: https://huggingface.co/{hf_checkpoint_repo_id}")
         except Exception as e:
             print(f"[HF Hub] ⚠ Warning: Failed to setup HF Hub uploader ({e})")
             print("[HF Hub] Continuing without auto-upload...")
             hf_uploader = None
 
-    # Create directories
-    Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    # Create experiment-specific directories
+    checkpoint_dir = Path(checkpoint_dir) / experiment_name
+    log_dir = Path(log_dir) / experiment_name
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\nExperiment: {experiment_name}")
+    print(f"Checkpoints: {checkpoint_dir}")
+    print(f"Logs: {log_dir}")
 
     # Determine device
     print("\n[1/5] Setting up device...")
@@ -105,13 +114,29 @@ def train(
     if pin_memory:
         print("Enabling pin_memory for faster CUDA transfers")
 
-    train_loader, val_loader = create_dataloaders(
-        data_dir=data_dir,
-        batch_size=batch_size,
-        train_split=0.9,
-        num_workers=num_workers,
-        pin_memory=pin_memory
-    )
+    if data_mode == 'webdataset':
+        if not hf_repo_id:
+            raise ValueError("hf_repo_id must be provided when data_mode='webdataset'")
+        print(f"Using WebDataset streaming from HuggingFace Hub: {hf_repo_id}")
+        train_loader, val_loader = create_dataloaders_wds(
+            hf_repo_id=hf_repo_id,
+            train_tar_pattern=train_tar_pattern,
+            val_tar_pattern=val_tar_pattern,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            hf_token=hf_token,
+            cache_dir=cache_dir,
+        )
+    else:
+        print(f"Using local dataset from: {data_dir}")
+        train_loader, val_loader = create_dataloaders(
+            data_dir=data_dir,
+            batch_size=batch_size,
+            train_split=train_split,
+            num_workers=num_workers,
+            pin_memory=pin_memory
+        )
 
     # Create model
     print("\n[3/5] Initializing model...")
@@ -156,8 +181,7 @@ def train(
     patience_counter = 0
     global_step = 0
 
-    checkpoint_path = Path(checkpoint_dir)
-    last_ckpt = checkpoint_path / 'last.ckpt'
+    last_ckpt = checkpoint_dir / 'last.ckpt'
 
     if last_ckpt.exists():
         print(f"\n📂 Loading checkpoint: {last_ckpt}")
@@ -182,7 +206,7 @@ def train(
 
     # Setup TensorBoard logger
     print("\n[4/5] Setting up logging...")
-    writer = SummaryWriter(log_dir=os.path.join(log_dir, 'deepvqe'))
+    writer = SummaryWriter(log_dir=str(log_dir))
 
     # Training state
     patience = 10
@@ -353,21 +377,22 @@ def train(
         }
 
         # Save last checkpoint
-        last_ckpt_path = os.path.join(checkpoint_dir, 'last.ckpt')
-        torch.save(checkpoint, last_ckpt_path)
+        last_ckpt_path = checkpoint_dir / 'last.ckpt'
+        torch.save(checkpoint, str(last_ckpt_path))
 
         # Save best checkpoint
         if val_loss_avg < best_val_loss:
             best_val_loss = val_loss_avg
-            best_ckpt_path = os.path.join(checkpoint_dir, f'best-epoch{epoch:02d}-val{val_loss_avg:.4f}.ckpt')
-            torch.save(checkpoint, best_ckpt_path)
+            best_ckpt_path = checkpoint_dir / f'best-epoch{epoch:02d}-val{val_loss_avg:.4f}.ckpt'
+            torch.save(checkpoint, str(best_ckpt_path))
             tqdm.write(f"  *** New best model saved: {best_ckpt_path}")
 
             # Upload best checkpoint to HF Hub
             if hf_uploader:
                 hf_uploader.upload_checkpoint(
-                    best_ckpt_path,
-                    commit_message=f"Best model - Epoch {epoch+1}, Val Loss: {val_loss_avg:.4f}"
+                    str(best_ckpt_path),
+                    commit_message=f"Best model - Epoch {epoch+1}, Val Loss: {val_loss_avg:.4f}",
+                    subfolder=f"checkpoints/{experiment_name}"
                 )
 
             patience_counter = 0
@@ -395,52 +420,61 @@ def train(
 
 if __name__ == "__main__":
     import argparse
+    from pathlib import Path
 
     parser = argparse.ArgumentParser(description='Train DeepVQE model')
-    parser.add_argument('--data_dir', type=str, default='./data_stft',
-                        help='Path to pre-computed STFT dataset directory')
-    parser.add_argument('--batch_size', type=int, default=4,
-                        help='Batch size (4 for MPS/M4 Pro, 16-32 for CUDA/RTX 5090)')
-    parser.add_argument('--epochs', type=int, default=100,
-                        help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=1e-4,
-                        help='Learning rate')
-    parser.add_argument('--num_workers', type=int, default=8,
-                        help='Number of data loading workers')
-    parser.add_argument('--alpha', type=float, default=0.7,
-                        help='Weight for amplitude loss')
-    parser.add_argument('--beta', type=float, default=0.3,
-                        help='Weight for phase loss')
-    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints',
-                        help='Directory to save checkpoints')
-    parser.add_argument('--log_dir', type=str, default='./logs',
-                        help='Directory for TensorBoard logs')
-    parser.add_argument('--accelerator', type=str, default='auto',
-                        choices=['auto', 'gpu', 'cpu', 'mps', 'cuda'],
-                        help='Accelerator type (auto detects cuda/mps/cpu)')
-    parser.add_argument('--accumulate_gradients', type=int, default=1,
-                        help='Accumulate gradients over N batches for larger effective batch size')
-    parser.add_argument('--hf_repo_id', type=str, default=None,
-                        help='Hugging Face repo ID for auto-uploading checkpoints (e.g., "username/deep-enhancer-ckpts"). Token from HF_TOKEN env var.')
+    parser.add_argument('--config', type=str, default='params.yaml',
+                        help='Path to config YAML file')
+    parser.add_argument('--data_mode', type=str, choices=['local', 'webdataset'],
+                        help='Override data_mode from config')
+    parser.add_argument('--batch_size', type=int,
+                        help='Override batch_size from config')
+    parser.add_argument('--epochs', type=int,
+                        help='Override num_epochs from config')
+    parser.add_argument('--lr', type=float,
+                        help='Override learning_rate from config')
 
     args = parser.parse_args()
 
-    print('Train args: ', args)
+    # Load config from YAML
+    config_path = Path(__file__).parent.parent / args.config
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
 
+    print(f"Loaded config from: {config_path}")
+
+    # Override with command line arguments
+    if args.data_mode:
+        config['data_mode'] = args.data_mode
+    if args.batch_size:
+        config['batch_size'] = args.batch_size
+    if args.epochs:
+        config['num_epochs'] = args.epochs
+    if args.lr:
+        config['learning_rate'] = args.lr
+
+    print("\nTraining configuration:")
+    print(yaml.dump(config, default_flow_style=False))
 
     train(
-            data_dir=args.data_dir,
-            batch_size=args.batch_size,
-            num_epochs=args.epochs,
-            learning_rate=args.lr,
-            num_workers=args.num_workers,
-            alpha=args.alpha,
-            beta=args.beta,
-            checkpoint_dir=args.checkpoint_dir,
-            log_dir=args.log_dir,
-            accelerator=args.accelerator,
-            devices=args.devices,
-            accumulate_gradients=args.accumulate_gradients,
-            hf_repo_id=args.hf_repo_id,
-            hf_token=None
-        )
+        data_mode=config['data_mode'],
+        data_dir=config['data_dir'],
+        train_split=config['train_split'],
+        hf_repo_id=config.get('hf_repo_id'),
+        train_tar_pattern=config['train_tar_pattern'],
+        val_tar_pattern=config['val_tar_pattern'],
+        cache_dir=config.get('cache_dir'),
+        batch_size=config['batch_size'],
+        num_epochs=config['num_epochs'],
+        learning_rate=config['learning_rate'],
+        num_workers=config['num_workers'],
+        alpha=config['alpha'],
+        beta=config['beta'],
+        experiment_name=config['experiment_name'],
+        checkpoint_dir=config['checkpoint_dir'],
+        log_dir=config['log_dir'],
+        accelerator=config['accelerator'],
+        accumulate_gradients=config['accumulate_gradients'],
+        hf_checkpoint_repo_id=config.get('hf_checkpoint_repo_id'),
+        hf_token=None
+    )
