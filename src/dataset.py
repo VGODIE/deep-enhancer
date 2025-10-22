@@ -126,21 +126,27 @@ def create_dataloaders(
 
 
 def decode_sample(sample):
-    """Decode a sample from webdataset tar archive"""
-    # Skip samples that don't have all required .pt files
-    if 'noisy_mic.pt' not in sample or 'farend.pt' not in sample or 'target.pt' not in sample:
+    """Decode a sample from webdataset tar archive
+
+    Expects tar to contain files like: sample_id.pt
+    Where each .pt file contains a dict with keys: noisy_mic, farend, target, sample_id
+    """
+    # Look for the .pt file (should be like 'sample_id.pt')
+    if '.pt' not in sample:
         return None
 
-    sample_id = sample['__key__']
-    noisy_mic = torch.load(io.BytesIO(sample['noisy_mic.pt']))
-    farend = torch.load(io.BytesIO(sample['farend.pt']))
-    target = torch.load(io.BytesIO(sample['target.pt']))
+    # Load the .pt file which contains the full dictionary
+    data = torch.load(io.BytesIO(sample['.pt']))
+
+    # Verify it has all required keys
+    if not all(k in data for k in ['noisy_mic', 'farend', 'target']):
+        return None
 
     return {
-        'noisy_mic': noisy_mic,
-        'farend': farend,
-        'target': target,
-        'sample_id': sample_id
+        'noisy_mic': data['noisy_mic'],
+        'farend': data['farend'],
+        'target': data['target'],
+        'sample_id': data.get('sample_id', sample['__key__'])
     }
 
 
