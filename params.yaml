@@ -1,22 +1,24 @@
 # DeepVQE Training Configuration
 
 # Data loading mode: 'local' or 'webdataset'
-data_mode: 'local'  # 'local' for local files, 'webdataset' for streaming from HuggingFace Hub
+data_mode: 'webdataset'  # 'local' for local files, 'webdataset' for streaming from HuggingFace Hub
 
 # Local data configuration (when data_mode='local')
 data_dir: './data_stft'
 train_split: 0.9
 
 # WebDataset configuration (when data_mode='webdataset')
-hf_repo_id: null  # e.g., 'username/deep-vqe-dataset'
-train_tar_pattern: 'train-*.tar.gz'  # Can be string or list
-val_tar_pattern: 'val-*.tar.gz'      # Can be string or list
+# For HuggingFace Hub: set hf_repo_id and use relative patterns
+# For local tars: set hf_repo_id=null and use absolute/relative paths
+hf_repo_id: null  # e.g., 'username/deep-vqe-dataset' or null for local
+train_tar_pattern: '/workspace/data/train_*.tar.gz'  # Can be string or list
+val_tar_pattern: '/workspace/data/val_*.tar.gz'      # Can be string or list
 cache_dir: null  # Cache directory for downloaded shards (null = default)
 
 # Training parameters
-batch_size: 8
+batch_size: 42
 num_epochs: 100
-learning_rate: 0.0001  # 1e-4
+learning_rate: 0.00001  # 1e-5
 num_workers: 8
 accumulate_gradients: 1
 
@@ -33,4 +35,4 @@ log_dir: './logs'
 accelerator: 'auto'  # 'auto', 'gpu', 'cpu', 'mps', 'cuda'
 
 # HuggingFace Hub auto-upload
-hf_checkpoint_repo_id: null  # e.g., 'username/deep-enhancer-checkpoints'
+hf_checkpoint_repo_id: 'vgodie/deep-vqe-s'  # e.g., 'username/deep-enhancer-checkpoints'
