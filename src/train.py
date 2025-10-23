@@ -28,8 +28,16 @@ def train(
         num_epochs=100,
         learning_rate=1e-4,
         num_workers=4,
+        # Loss configuration
+        loss_type='multi_resolution',
         alpha=0.7,
         beta=0.3,
+        lambda_sc=1.0,
+        lambda_mag=1.0,
+        lambda_sisdr=0.5,
+        fft_sizes=[512, 1024, 2048],
+        hop_sizes=[128, 256, 512],
+        win_sizes=[512, 1024, 2048],
         experiment_name='default',
         checkpoint_dir='./checkpoints',
         log_dir='./logs',
@@ -54,6 +62,7 @@ def train(
     from pathlib import Path
     from torch.utils.tensorboard import SummaryWriter
     from loss import DeepVQELoss
+    from multiloss import MultiResolutionLoss
     from tqdm import tqdm
 
     print("=" * 80)
@@ -151,7 +160,26 @@ def train(
     except Exception as e:
         print(f"⚠ Warning: torch.compile() failed ({e}). Continuing without compilation...")
 
-    loss_fn = DeepVQELoss(alpha=alpha, beta=beta, power=0.3)
+    # Setup loss function based on configuration
+    print(f"\n[Loss] Using loss type: {loss_type}")
+    if loss_type == 'multi_resolution':
+        loss_fn = MultiResolutionLoss(
+            original_n_fft=512,
+            original_hop_length=128,
+            original_win_length=512,
+            fft_sizes=fft_sizes,
+            hop_sizes=hop_sizes,
+            win_sizes=win_sizes,
+            lambda_sc=lambda_sc,
+            lambda_mag=lambda_mag,
+            lambda_sisdr=lambda_sisdr
+        ).to(device)
+        print(f"  Multi-Resolution STFT Loss:")
+        print(f"    - STFT resolutions: {fft_sizes}")
+        print(f"    - Weights: λ_sc={lambda_sc}, λ_mag={lambda_mag}, λ_sisdr={lambda_sisdr}")
+    else:  # 'original'
+        loss_fn = DeepVQELoss(alpha=alpha, beta=beta, power=0.3)
+        print(f"  Original DeepVQE Loss: α={alpha}, β={beta}")
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -222,8 +250,7 @@ def train(
         # Training phase
         model.train()
         train_loss_sum = 0.0
-        train_amp_loss_sum = 0.0
-        train_phase_loss_sum = 0.0
+        train_loss_components = {}  # Accumulate all loss components dynamically
         train_batches = 0
 
         optimizer.zero_grad()
@@ -272,18 +299,20 @@ def train(
                 optimizer.zero_grad()
                 global_step += 1
 
-            # Accumulate metrics
+            # Accumulate metrics dynamically
             train_loss_sum += loss.item() * accumulate_gradients
-            train_amp_loss_sum += loss_dict['amp_loss']
-            train_phase_loss_sum += loss_dict['phase_loss']
+            for key, value in loss_dict.items():
+                if key not in train_loss_components:
+                    train_loss_components[key] = 0.0
+                train_loss_components[key] += value
             train_batches += 1
 
-            # Update progress bar with current loss
-            train_pbar.set_postfix({
-                'loss': f"{loss.item() * accumulate_gradients:.4f}",
-                'amp': f"{loss_dict['amp_loss']:.4f}",
-                'phase': f"{loss_dict['phase_loss']:.4f}"
-            })
+            # Update progress bar with current loss (show first 2 components)
+            postfix = {'loss': f"{loss.item() * accumulate_gradients:.4f}"}
+            for i, (key, value) in enumerate(loss_dict.items()):
+                if i < 2 and key != 'total_loss':  # Show first 2 non-total metrics
+                    postfix[key.replace('_loss', '')] = f"{value:.4f}"
+            train_pbar.set_postfix(postfix)
 
             # Log to TensorBoard every 10 steps
             if batch_idx % 10 == 0:
@@ -293,14 +322,12 @@ def train(
 
         # Calculate epoch metrics
         train_loss_avg = train_loss_sum / train_batches
-        train_amp_loss_avg = train_amp_loss_sum / train_batches
-        train_phase_loss_avg = train_phase_loss_sum / train_batches
+        train_loss_components_avg = {k: v / train_batches for k, v in train_loss_components.items()}
 
         # Validation phase
         model.eval()
         val_loss_sum = 0.0
-        val_amp_loss_sum = 0.0
-        val_phase_loss_sum = 0.0
+        val_loss_components = {}
         val_batches = 0
 
         # Validation batch progress bar
@@ -323,30 +350,35 @@ def train(
                     loss, loss_dict = loss_fn(enhanced, clean_target)
 
                 val_loss_sum += loss.item()
-                val_amp_loss_sum += loss_dict['amp_loss']
-                val_phase_loss_sum += loss_dict['phase_loss']
+                for key, value in loss_dict.items():
+                    if key not in val_loss_components:
+                        val_loss_components[key] = 0.0
+                    val_loss_components[key] += value
                 val_batches += 1
 
-                # Update progress bar
-                val_pbar.set_postfix({
-                    'loss': f"{loss.item():.4f}",
-                    'amp': f"{loss_dict['amp_loss']:.4f}",
-                    'phase': f"{loss_dict['phase_loss']:.4f}"
-                })
+                # Update progress bar (show first 2 components)
+                postfix = {'loss': f"{loss.item():.4f}"}
+                for i, (key, value) in enumerate(loss_dict.items()):
+                    if i < 2 and key != 'total_loss':
+                        postfix[key.replace('_loss', '')] = f"{value:.4f}"
+                val_pbar.set_postfix(postfix)
 
         val_pbar.close()
 
         val_loss_avg = val_loss_sum / val_batches
-        val_amp_loss_avg = val_amp_loss_sum / val_batches
-        val_phase_loss_avg = val_phase_loss_sum / val_batches
+        val_loss_components_avg = {k: v / val_batches for k, v in val_loss_components.items()}
 
         # Log epoch metrics
         writer.add_scalar('train/loss_epoch', train_loss_avg, epoch)
-        writer.add_scalar('train/amp_loss', train_amp_loss_avg, epoch)
-        writer.add_scalar('train/phase_loss', train_phase_loss_avg, epoch)
+        for key, value in train_loss_components_avg.items():
+            if key != 'total_loss':
+                writer.add_scalar(f'train/{key}', value, epoch)
+
         writer.add_scalar('val/loss_epoch', val_loss_avg, epoch)
-        writer.add_scalar('val/amp_loss', val_amp_loss_avg, epoch)
-        writer.add_scalar('val/phase_loss', val_phase_loss_avg, epoch)
+        for key, value in val_loss_components_avg.items():
+            if key != 'total_loss':
+                writer.add_scalar(f'val/{key}', value, epoch)
+
         writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
 
         # Update epoch progress bar with summary
@@ -358,8 +390,18 @@ def train(
 
         # Print epoch summary
         tqdm.write(f"\nEpoch [{epoch+1}/{num_epochs}] Summary:")
-        tqdm.write(f"  Train Loss: {train_loss_avg:.4f} (Amp: {train_amp_loss_avg:.4f}, Phase: {train_phase_loss_avg:.4f})")
-        tqdm.write(f"  Val Loss:   {val_loss_avg:.4f} (Amp: {val_amp_loss_avg:.4f}, Phase: {val_phase_loss_avg:.4f})")
+
+        # Format train loss components
+        train_components_str = ", ".join([f"{k.replace('_loss', '')}: {v:.4f}"
+                                          for k, v in train_loss_components_avg.items()
+                                          if k != 'total_loss'])
+        tqdm.write(f"  Train Loss: {train_loss_avg:.4f} ({train_components_str})")
+
+        # Format val loss components
+        val_components_str = ", ".join([f"{k.replace('_loss', '')}: {v:.4f}"
+                                        for k, v in val_loss_components_avg.items()
+                                        if k != 'total_loss'])
+        tqdm.write(f"  Val Loss:   {val_loss_avg:.4f} ({val_components_str})")
         tqdm.write(f"  LR: {optimizer.param_groups[0]['lr']:.6f}")
 
         # Learning rate scheduler step
@@ -469,8 +511,16 @@ if __name__ == "__main__":
         num_epochs=config['num_epochs'],
         learning_rate=config['learning_rate'],
         num_workers=config['num_workers'],
-        alpha=config['alpha'],
-        beta=config['beta'],
+        # Loss configuration
+        loss_type=config.get('loss_type', 'multi_resolution'),
+        alpha=config.get('alpha', 0.7),
+        beta=config.get('beta', 0.3),
+        lambda_sc=config.get('lambda_sc', 1.0),
+        lambda_mag=config.get('lambda_mag', 1.0),
+        lambda_sisdr=config.get('lambda_sisdr', 0.5),
+        fft_sizes=config.get('fft_sizes', [512, 1024, 2048]),
+        hop_sizes=config.get('hop_sizes', [128, 256, 512]),
+        win_sizes=config.get('win_sizes', [512, 1024, 2048]),
         experiment_name=config['experiment_name'],
         checkpoint_dir=config['checkpoint_dir'],
         log_dir=config['log_dir'],

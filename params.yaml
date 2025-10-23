@@ -22,12 +22,27 @@ learning_rate: 0.00001  # 1e-5
 num_workers: 8
 accumulate_gradients: 1
 
-# Loss function weights
+# Loss function configuration
+loss_type: 'multi_resolution'  # 'original' or 'multi_resolution'
+
+# Original loss weights (used when loss_type='original')
 alpha: 0.7  # Amplitude loss weight
 beta: 0.3   # Phase loss weight
 
+# Multi-Resolution Loss weights (used when loss_type='multi_resolution')
+# Recommended for echo cancellation + noise reduction:
+lambda_sc: 1.0      # Spectral convergence: forces overall spectral shape matching
+lambda_mag: 1.0     # Log magnitude: ensures accuracy at all energy levels (quiet + loud)
+lambda_sisdr: 0.5   # SI-SDR: time-domain perceptual quality refinement
+
+# Multi-STFT resolutions (captures features at different time scales)
+# 512: fast transients (consonants), 1024: pitch/harmonics, 2048: spectral envelope
+fft_sizes: [512, 1024, 2048]
+hop_sizes: [128, 256, 512]    # hop = fft_size // 4
+win_sizes: [512, 1024, 2048]  # typically same as fft_size
+
 # Directories
-experiment_name: 'default'  # Subdirectory name for this experiment
+experiment_name: 'multiloss'  # Subdirectory name for this experiment
 checkpoint_dir: './checkpoints'
 log_dir: './logs'
 
