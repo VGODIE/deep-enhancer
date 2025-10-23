@@ -19,8 +19,8 @@ class DeepVQETrainer(L.LightningModule):
         model: Union[nn.Module, Type[nn.Module]],
         alpha: float = 0.7,
         beta: float = 0.3,
-        power: float = 2,
-        lr: float = 1e-3,
+        power: float = 0.3,
+        lr: float = 1e-5,
         compile: bool = True
     ):
         """
@@ -100,7 +100,7 @@ class DeepVQETrainer(L.LightningModule):
 
     def configure_optimizers(self):
         """Configure optimizer and learning rate scheduler"""
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=0.01)
 
         # Optional: Add learning rate scheduler
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(

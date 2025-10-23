@@ -160,7 +160,7 @@ def train(
     print(f"Trainable parameters: {trainable_params:,}")
 
     # Setup optimizer and scheduler
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min',

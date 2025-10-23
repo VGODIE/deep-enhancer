@@ -11,7 +11,7 @@ class CompressedAmplitudeSpectralLoss(torch.nn.Module):
     
     where p is the compression power (e.g., 0.5 for square root)
     """
-    def __init__(self, power=0.5):
+    def __init__(self, power=0.3):
         """
         Args:
             power: float - compression power (0.5 = square root, 1.0 = no compression)
@@ -129,7 +129,7 @@ class DeepVQELoss(nn.Module):
 
     Default weights: α=0.7, β=0.3 (amplitude is typically weighted higher)
     """
-    def __init__(self, alpha=0.7, beta=0.3, power=0.5):
+    def __init__(self, alpha=0.7, beta=0.3, power=0.3):
         """
         Args:
             alpha: weight for amplitude loss (default: 0.7)

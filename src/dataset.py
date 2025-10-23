@@ -131,12 +131,9 @@ def decode_sample(sample):
     Expects tar to contain files like: sample_id.pt
     Where each .pt file contains a dict with keys: noisy_mic, farend, target, sample_id
     """
-    # Look for the .pt file (should be like 'sample_id.pt')
-    if '.pt' not in sample:
+    if 'pt' not in sample:
         return None
-
-    # Load the .pt file which contains the full dictionary
-    data = torch.load(io.BytesIO(sample['.pt']))
+    data = torch.load(io.BytesIO(sample['pt']))
 
     # Verify it has all required keys
     if not all(k in data for k in ['noisy_mic', 'farend', 'target']):
