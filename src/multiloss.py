@@ -62,7 +62,10 @@ class SpectralConvergenceLoss(nn.Module):
             pred_mag: (B, F, T) - predicted magnitude
             target_mag: (B, F, T) - target magnitude
         """
-        return torch.norm(pred_mag - target_mag, p='fro') / (torch.norm(target_mag, p='fro') + 1e-8)
+        # Clamp denominator to prevent explosion with silent targets
+        target_norm = torch.norm(target_mag, p='fro')
+        pred_diff_norm = torch.norm(pred_mag - target_mag, p='fro')
+        return pred_diff_norm / torch.clamp(target_norm, min=0.01)
 
 
 class LogSTFTMagnitudeLoss(nn.Module):
