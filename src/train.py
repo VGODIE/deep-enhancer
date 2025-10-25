@@ -7,7 +7,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, Learning
 from lightning.pytorch.loggers import TensorBoardLogger
 from dataset import create_dataloaders, create_dataloaders_wds
 from trainer import DeepVQETrainer
-from deepvqe import DeepVQE_S, DeepVQE
+from deepvqe import DeepVQE, DeepVQE_M, DeepVQE_S
 from hf_hub_utils import HFCheckpointUploader
 import warnings
 import os
@@ -157,11 +157,14 @@ def train(
     if model_type == 'full':
         model = DeepVQE().to(device)
         print("Using DeepVQE (Full model)")
+    elif model_type == 'medium':
+        model = DeepVQE_M().to(device)
+        print("Using DeepVQE-M (Medium model)")
     elif model_type == 'small':
         model = DeepVQE_S().to(device)
         print("Using DeepVQE-S (Small model)")
     else:
-        raise ValueError(f"Unknown model_type: {model_type}. Choose 'full' or 'small'")
+        raise ValueError(f"Unknown model_type: {model_type}. Choose 'full', 'medium', or 'small'")
 
     try:
         print("Compiling model with torch.compile()...")

@@ -226,6 +226,115 @@ class DeepVQE(nn.Module):
         return x_enh
 
 
+class DeepVQE_M(nn.Module):
+    """
+    DeepVQE-M: Medium-sized version of DeepVQE
+
+    Balanced model between Full and Small with same depth as Full.
+
+    Architecture Comparison:
+    ┌──────────────────┬──────────────┬──────────────┬─────────────┐
+    │ Component        │ Full         │ Medium (M)   │ Small (S)   │
+    ├──────────────────┼──────────────┼──────────────┼─────────────┤
+    │ Mic Encoder      │ 64, 128      │ 32, 80       │ 16, 40      │
+    │ System Encoder   │ 32, 128      │ 32, 80       │ 8, 24       │
+    │ After Concat     │ 256 (128+128)│ 160 (80+80)  │ 64 (40+24)  │
+    │ Shared Encoder   │ 128,128,128  │ 112, 80, 80  │ 56, 24      │
+    │ Total Depth      │ 5 layers     │ 5 layers     │ 4 layers    │
+    │ Bottleneck       │ 1152→576     │ 720→360      │ 408→192     │
+    │ Decoder          │ 128×3,64,27  │ 80,112,80... │ 56,40,16,27 │
+    │ Residual Blocks  │ All          │ All-1        │ Middle only │
+    └──────────────────┴──────────────┴──────────────┴─────────────┘
+
+    ~50-60% params of Full, ~2-3x params of Small.
+    """
+    def __init__(self):
+        super().__init__()
+        # Feature extraction (same as other models)
+        self.fe = FE()
+
+        # Microphone encoder: 32 -> 80 (WITH residual blocks)
+        self.enblock1 = EncoderBlock(2, 32, use_residual=True)
+        self.enblock2 = EncoderBlock(32, 80, use_residual=True)
+
+        # System/Far-end encoder: 32 -> 80 (WITH residual blocks) - SAME AS MIC
+        self.system_enblock1 = EncoderBlock(2, 32, use_residual=True)
+        self.system_enblock2 = EncoderBlock(32, 80, use_residual=True)
+
+        # Alignment block - handles mic (80 ch) and farend (80 ch) inputs
+        self.align = AlignBlock(
+            in_channels=80,        # mic channels
+            hidden_channels=64,    # projection dimension
+            in_channels_ref=80     # farend channels
+        )
+
+        # Shared encoder after alignment: 160 -> 112 -> 80 -> 80 (WITH residual blocks)
+        self.enblock3 = EncoderBlock(160, 112, use_residual=True)  # 160 = 80 mic + 80 aligned farend
+        self.enblock4 = EncoderBlock(112, 80, use_residual=True)
+        self.enblock5 = EncoderBlock(80, 80, use_residual=True)
+
+        # Bottleneck - now F//32 ~ 9 (same as Full)
+        self.bottle = Bottleneck(80*9, 40*9)
+
+        # Decoder: Must match encoder skip connection channels
+        # Skip connections: en_x5(80), en_x4(80), en_x3(112), en_x_mic2(80), en_x_mic1(32)
+        self.deblock5 = DecoderBlock(80, 80, use_residual=True)    # Skip from en_x5(80)
+        self.deblock4 = DecoderBlock(80, 112, use_residual=True)   # Skip from en_x4(80)
+        self.deblock3 = DecoderBlock(112, 80, use_residual=True)   # Skip from en_x3(112)
+        self.deblock2 = DecoderBlock(80, 32, use_residual=True)    # Skip from en_x_mic2(80)
+        self.deblock1 = DecoderBlock(32, 27, use_residual=False)   # Last: no residual, skip from en_x_mic1(32)
+
+        # Complex Convolving Mask (same as other models)
+        self.ccm = CCM()
+
+    def forward(self, x_mic, x_system):
+        """
+        Args:
+            x_mic: (B,F,T,2) - noisy microphone signal (complex STFT)
+            x_system: (B,F,T,2) - system reference signal (complex STFT)
+
+        Returns:
+            x_enh: (B,F,T,2) - enhanced signal (complex STFT)
+        """
+        # Store original input for CCM
+        x_mic_orig = x_mic
+
+        x_mic = self.fe(x_mic)            # (B, 2, T, F)
+        x_system = self.fe(x_system)      # (B, 2, T, F)
+
+        # Microphone path
+        en_x_mic1 = self.enblock1(x_mic)  # (B, 32, T, F//2)
+        en_x_mic2 = self.enblock2(en_x_mic1)  # (B, 80, T, F//4)
+
+        # System path
+        en_x_system1 = self.system_enblock1(x_system)  # (B, 16, T, F//2)
+        en_x_system2 = self.system_enblock2(en_x_system1)  # (B, 80, T, F//4)
+
+        # Align and concatenate
+        aligned = self.align(en_x_mic2, en_x_system2)  # (B, 80, T, F//4) - aligned system ref
+        en_x_mic_n_system_aligned = torch.cat([en_x_mic2, aligned], dim=1)  # (B, 160, T, F//4)
+
+        # Continue encoding
+        en_x3 = self.enblock3(en_x_mic_n_system_aligned)  # (B, 112, T, F//8)
+        en_x4 = self.enblock4(en_x3)  # (B, 80, T, F//16)
+        en_x5 = self.enblock5(en_x4)  # (B, 80, T, F//32)
+
+        # Bottleneck
+        en_xr = self.bottle(en_x5)    # (B, 80, T, F//32)
+
+        # Decoder with skip connections (U-Net style)
+        de_x5 = self.deblock5(en_xr, en_x5)[..., :en_x4.shape[-1]]  # (B, 80, T, F//16)
+        de_x4 = self.deblock4(de_x5, en_x4)[..., :en_x3.shape[-1]]  # (B, 112, T, F//8)
+        de_x3 = self.deblock3(de_x4, en_x3)[..., :en_x_mic2.shape[-1]]  # (B, 80, T, F//4)
+        de_x2 = self.deblock2(de_x3, en_x_mic2)[..., :en_x_mic1.shape[-1]]  # (B, 32, T, F//2)
+        de_x1 = self.deblock1(de_x2, en_x_mic1)[..., :x_mic.shape[-1]]  # (B, 27, T, F)
+
+        # Complex convolving mask
+        x_enh = self.ccm(de_x1, x_mic_orig)  # (B, F, T, 2)
+
+        return x_enh
+
+
 class DeepVQE_S(nn.Module):
     """
     DeepVQE-S: Small/Production-sized version of DeepVQE
@@ -338,6 +447,18 @@ if __name__ == "__main__":
     print(f"Total parameters: {total_params:,}")
 
     print("\n" + "=" * 80)
+    print("Testing DeepVQE-M (Medium Model)")
+    print("=" * 80)
+    model_m = DeepVQE_M().eval().to(device)
+    y_m = model_m(x_mic, x_system)
+    print(f"Input shape: {x_mic.shape}, Output shape: {y_m.shape}")
+
+    # Count parameters
+    total_params_m = sum(p.numel() for p in model_m.parameters())
+    print(f"Total parameters: {total_params_m:,}")
+    print(f"vs Full: {total_params_m/total_params*100:.1f}% ({(1 - total_params_m/total_params)*100:.1f}% reduction)")
+
+    print("\n" + "=" * 80)
     print("Testing DeepVQE-S (Small Model)")
     print("=" * 80)
     model_s = DeepVQE_S().eval().to(device)
@@ -347,7 +468,8 @@ if __name__ == "__main__":
     # Count parameters
     total_params_s = sum(p.numel() for p in model_s.parameters())
     print(f"Total parameters: {total_params_s:,}")
-    print(f"Parameter reduction: {(1 - total_params_s/total_params)*100:.1f}%")
+    print(f"vs Full: {total_params_s/total_params*100:.1f}% ({(1 - total_params_s/total_params)*100:.1f}% reduction)")
+    print(f"vs Medium: {total_params_s/total_params_m*100:.1f}% ({(1 - total_params_s/total_params_m)*100:.1f}% reduction)")
 
     """causality check - verify model doesn't look into the future"""
     a_mic = torch.randn(1, 257, 100, 2, device=device)
