@@ -7,7 +7,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, Learning
 from lightning.pytorch.loggers import TensorBoardLogger
 from dataset import create_dataloaders, create_dataloaders_wds
 from trainer import DeepVQETrainer
-from deepvqe import DeepVQE_S
+from deepvqe import DeepVQE_S, DeepVQE
 from hf_hub_utils import HFCheckpointUploader
 import warnings
 import os
