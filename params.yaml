@@ -1,5 +1,8 @@
 # DeepVQE Training Configuration
 
+# Model selection
+model_type: 'full'  # 'full' for DeepVQE (1.4M params), 'small' for DeepVQE_S (130K params)
+
 # Data loading mode: 'local' or 'webdataset'
 data_mode: 'webdataset'  # 'local' for local files, 'webdataset' for streaming from HuggingFace Hub
 

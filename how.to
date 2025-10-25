@@ -3,7 +3,7 @@ git clone https://github.com/VGODIE/deep-enhancer.git
 cd deep-enhancer
 pip install -U pip
 pip install -r requirements.txt
-python src/upload_to_hf.py --action download-file --repo-id vgodie/data_stft --repo-type dataset --local-path . --filename dataset.tar.gz
+python src/hf_data_loader.py --action download-file --repo-id vgodie/data_stft --repo-type dataset --local-path /workspace/data --remote-filepath train_synthetic.tar.gz val_synthetic.tar.gz train_farend_singletalk.tar.gz
 pv dataset.tar.gz | tar -I pigz -x && rm dataset.tar.gz 
 tar -cf - directory_name/ | pv | pigz -9 -p $(nproc) > archive.tar.gz # pack tar
 python src/train.py --batch_size 42 --hf_repo_id vgodie/deep-vqe-s
@@ -24,3 +24,5 @@ nvcc --version
 
 
 tar -cf - farend_singletalk/ | pv | pigz -9 -p $(nproc) > farend_singletalk.tar.gz # pack tar
+
+python src/hf_data_loader.py --action download-file --repo-id vgodie/deep-vqe-s --repo-type model --local-path checkpoints --remote-filepath checkpoints/multiloss-w-singletalk-2/best-epoch153-val0.2913.ckpt

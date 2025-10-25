@@ -17,6 +17,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
 warnings.filterwarnings("ignore", category=UserWarning, module="torchcodec")
 
 def train(
+        model_type='full',
         data_mode='local',
         data_dir='./data_stft',
         train_split=0.9,
@@ -150,8 +151,17 @@ def train(
 
     # Create model
     print("\n[3/5] Initializing model...")
-    print(f'learning_rate: {learning_rate}')
-    model = DeepVQE_S().to(device)
+    print(f'Model type: {model_type}')
+    print(f'Learning rate: {learning_rate}')
+
+    if model_type == 'full':
+        model = DeepVQE().to(device)
+        print("Using DeepVQE (Full model)")
+    elif model_type == 'small':
+        model = DeepVQE_S().to(device)
+        print("Using DeepVQE-S (Small model)")
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}. Choose 'full' or 'small'")
 
     try:
         print("Compiling model with torch.compile()...")
@@ -500,6 +510,7 @@ if __name__ == "__main__":
     print(yaml.dump(config, default_flow_style=False))
 
     train(
+        model_type=config.get('model_type', 'full'),
         data_mode=config['data_mode'],
         data_dir=config['data_dir'],
         train_split=config['train_split'],
